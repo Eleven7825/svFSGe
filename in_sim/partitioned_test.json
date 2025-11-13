@@ -4,7 +4,7 @@
     "tortuosity": false,
     "mesh": "fsg_full_coarse.json",
     "n_procs": {
-        "fluid": 8,
+        "fluid": 4,
         "mesh": 1,
         "solid": 1
     },
