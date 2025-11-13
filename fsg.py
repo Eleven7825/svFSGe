@@ -49,6 +49,10 @@ class FSG(svFSI):
         # archive results
         self.archive()
 
+        # save gradient tracking data (magnitude-with-gradient-tracking branch)
+        if hasattr(self, 'tracking_data'):
+            self.save_tracking_data()
+
         # plot convergence
         self.plot_convergence()
 
