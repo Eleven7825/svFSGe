@@ -117,6 +117,13 @@ class svFSI(Simulation):
         self.dk = defaultdict(list)
         self.dtk = defaultdict(list)
 
+        # gradient tracking (for calibration of gradient-sensing branch)
+        self.tracking_data = {
+            "time_steps": [],           # time step indices
+            "max_wss_gradient": [],     # max |grad(WSS)| at each time
+            "tau_o_ratio": [],          # tau/tau_o ratio (from magnitude sensing)
+        }
+
         # current/previous solution vector at interface and in volume
         self.curr = Solution(self)
         self.prev = Solution(self)
@@ -306,6 +313,59 @@ class svFSI(Simulation):
         # write geometry to file
         write_geo(join(self.p["f_out"], self.p["interfaces"]["geo_mesh"]), mesh)
 
+    def compute_axial_wss_gradient(self, wss_magnitude):
+        """
+        Compute axial WSS gradient magnitude for growth stimulus.
+
+        Calculates ∂||WSS||/∂z - the spatial rate of change of wall shear stress
+        magnitude along the vessel axis.
+
+        Uses finite differences on a structured cylindrical mesh where points are
+        organized as slices perpendicular to z-axis. Interior points use central
+        difference; boundary points use forward/backward difference.
+
+        Args:
+            wss_magnitude: (N,) array of WSS magnitudes at all solid points
+
+        Returns:
+            wss_gradient: (N,) array of ∂WSS/∂z (units: Pa/mm)
+        """
+        # Get mesh parameters
+        n_cir = self.mesh_p["n_cir"]
+        n_rad_gr = self.mesh_p["n_rad_gr"]
+        n_points_per_slice = n_cir * (n_rad_gr + 1)
+
+        # Get solid mesh points
+        points = self.points[("vol", "solid")]
+        n_points = len(points)
+        wss_gradient = np.zeros(n_points)
+
+        for i in range(n_points):
+            # Indices of neighbors in z-direction (same circumferential/radial position)
+            idx_prev = i - n_points_per_slice  # previous z-slice
+            idx_next = i + n_points_per_slice  # next z-slice
+
+            # Compute gradient based on position
+            if idx_prev >= 0 and idx_next < n_points:
+                # Interior point: central difference
+                dz = points[idx_next, 2] - points[idx_prev, 2]
+                dwss = wss_magnitude[idx_next] - wss_magnitude[idx_prev]
+                wss_gradient[i] = dwss / dz if dz > 1e-12 else 0.0
+
+            elif idx_prev < 0:
+                # Boundary at z=0: forward difference
+                dz = points[idx_next, 2] - points[i, 2]
+                dwss = wss_magnitude[idx_next] - wss_magnitude[i]
+                wss_gradient[i] = dwss / dz if dz > 1e-12 else 0.0
+
+            else:  # idx_next >= n_points
+                # Boundary at z=end: backward difference
+                dz = points[i, 2] - points[idx_prev, 2]
+                dwss = wss_magnitude[i] - wss_magnitude[idx_prev]
+                wss_gradient[i] = dwss / dz if dz > 1e-12 else 0.0
+
+        return wss_gradient
+
     def set_solid(self, n, t):
         # name of wall properties array
         name = "gr_properties"
@@ -313,9 +373,28 @@ class svFSI(Simulation):
         # read solid volume mesh
         solid = self.mesh[("vol", "solid")]
 
-        # set wss
+        # get WSS magnitude
+        wss_mag = self.curr.get(("solid", "wss", "vol"))
+
+        # set wss (MAGNITUDE SENSING - unchanged from master)
         props = v2n(solid.GetPointData().GetArray(name))
-        props[:, 6] = self.curr.get(("solid", "wss", "vol"))
+        props[:, 6] = wss_mag
+
+        # Compute WSS gradient for tracking (not used for sensing)
+        wss_grad = self.compute_axial_wss_gradient(wss_mag)
+        max_wss_grad = np.max(np.abs(wss_grad))
+
+        # Store tracking data for calibration
+        self.tracking_data["time_steps"].append(t)
+        self.tracking_data["max_wss_gradient"].append(max_wss_grad)
+
+        # Extract tau/tau_o if available (tauo is in props[:, 3])
+        tauo = props[:, 3]
+        if np.any(tauo > 0):  # tau_o is set after prestress
+            tau_ratio = np.mean(wss_mag / tauo)  # average ratio across all points
+            self.tracking_data["tau_o_ratio"].append(tau_ratio)
+        else:
+            self.tracking_data["tau_o_ratio"].append(0.0)
 
         # set time
         props[:, 7] = t + 1
@@ -349,6 +428,37 @@ class svFSI(Simulation):
             add_array(geo, num, name)
             fn = join(self.p["f_out"], self.p["interfaces"]["load_perturbation"])
             write_geo(fn, geo)
+
+    def save_tracking_data(self, filename="gradient_tracking.csv"):
+        """
+        Export gradient tracking data to CSV file.
+
+        Saves time-series data of max WSS gradient and tau/tau_o ratio
+        for calibration of gradient-sensing branch.
+
+        Args:
+            filename: Name of CSV file (saved in output directory)
+        """
+        import csv
+
+        filepath = join(self.p["f_out"], filename)
+
+        with open(filepath, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+
+            # Write header
+            writer.writerow(['time_step', 'max_wss_gradient', 'tau_tau_o_ratio'])
+
+            # Write data
+            for i in range(len(self.tracking_data["time_steps"])):
+                writer.writerow([
+                    self.tracking_data["time_steps"][i],
+                    self.tracking_data["max_wss_gradient"][i],
+                    self.tracking_data["tau_o_ratio"][i]
+                ])
+
+        print(f"Gradient tracking data saved to: {filepath}")
+        return filepath
 
     def step(self, name, i, t, n, times):
         if name not in self.fields:
