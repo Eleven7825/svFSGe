@@ -1,0 +1,279 @@
+{
+    "coup": {
+        "iqn_ils_eps": 0.1,
+        "iqn_ils_q": 20,
+        "method": "iqn_ils",
+        "nmax": 200,
+        "nmin": 1,
+        "omega": {
+            "disp": [
+                [
+                    1.0,
+                    1.0,
+                    1.0
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ],
+                [
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            ]
+        },
+        "omega0": 0.1,
+        "tol": 0.001
+    },
+    "debug": false,
+    "error": {
+        "disp": [
+            [
+                1.0,
+                0.0011752032830542143,
+                2.9309939485758103e-05
+            ],
+            [
+                0.040072289713691124,
+                0.019266298111842484,
+                0.01411839019083449,
+                0.013514085852290712,
+                0.011781846345333887,
+                0.01044227855514935,
+                0.007549626698390811,
+                0.009332342628450991,
+                0.0028524856792401542,
+                0.0025846400309777065,
+                0.00149274540168823,
+                0.0006895817603165861
+            ],
+            [
+                0.012472913235441297,
+                0.011663908025862054,
+                0.010773208606403635,
+                0.0033192188376153127,
+                0.0008100387134981022
+            ],
+            [
+                0.008893867069144957,
+                0.00977796438415435,
+                0.0041535892354865635,
+                0.001651210017101388,
+                0.001060127183388893,
+                0.0006580710775926204
+            ],
+            [
+                0.013461784101530644,
+                0.004882686681756739,
+                0.005066052108203572,
+                0.0020675620539889854,
+                0.0009570868718625452
+            ],
+            [
+                0.01374482127806234,
+                0.00422560757132906,
+                0.002288419327983877,
+                0.002666077301199892,
+                0.0019063524534712788,
+                0.0009383457176576375
+            ],
+            [
+                0.02432825316847225,
+                0.008875851803577408,
+                0.0036403433114480625,
+                0.0018643805228972456,
+                0.0010902255908930693,
+                0.0007716531290383861
+            ],
+            [
+                0.026510986838387193,
+                0.006556764945745348,
+                0.004203760798864718,
+                0.0027637005162786023,
+                0.001248496581880551,
+                0.0009960282818670871
+            ],
+            [
+                0.012135079198408113,
+                0.013393750986439853,
+                0.0036599696558489775,
+                0.0016592655429275255,
+                0.0016441838421052371,
+                0.0013040743968920944,
+                0.0006443667099360082
+            ],
+            [
+                0.008919496234735556,
+                0.01264428332943864,
+                0.0018818467110002031,
+                0.0013606629005252333,
+                0.000963493292865007
+            ],
+            [
+                0.022752589979039207,
+                0.009184483246129945,
+                0.003223466233536808,
+                0.0011106895091227374,
+                0.0007430761532092224
+            ]
+        ]
+    },
+    "exe": {
+        "fluid": "svFSI-build/svFSI-build/bin/svFSI",
+        "mesh": "svFSI-build/svFSI-build/bin/svFSI",
+        "solid": "svFSI-build/svFSI-build/bin/svFSI"
+    },
+    "f_arx": "/svfsi/svFSGe/partitioned_2025-11-13_02-00-26.996293/archive",
+    "f_conv": "/svfsi/svFSGe/partitioned_2025-11-13_02-00-26.996293/partitioned/converged",
+    "f_out": "/svfsi/svFSGe/partitioned_2025-11-13_02-00-26.996293",
+    "f_sim": "/svfsi/svFSGe/partitioned_2025-11-13_02-00-26.996293/partitioned",
+    "fluid": {
+        "mu": 4e-06,
+        "p0": 13.9868,
+        "q0": 1000.0,
+        "q0_rate": 200.0,
+        "rho": 1.06e-06
+    },
+    "fmax": 1.0,
+    "fsi": true,
+    "inp": {
+        "fluid": "steady_full.xml",
+        "mesh": "mesh_full.xml",
+        "solid": "gr_full_restart.xml"
+    },
+    "interfaces": {
+        "bc_flow": "steady_flow.dat",
+        "bc_pressure": "steady_pressure.dat",
+        "disp": "interface_displacement.dat",
+        "geo_fluid": "fluid.vtu",
+        "geo_mesh": "mesh.vtu",
+        "geo_solid": "solid.vtu",
+        "inflow_vector": "inflow_vector.dat",
+        "load_pressure": "interface_pressure.vtp",
+        "load_wss": "interface_wss.vtp"
+    },
+    "mesh": "fsg_full_coarse.json",
+    "n_max": {
+        "fluid": 10,
+        "mesh": 1,
+        "solid": 1
+    },
+    "n_procs": {
+        "fluid": 4,
+        "mesh": 1,
+        "solid": 1
+    },
+    "name": "partitioned",
+    "nmax": 10,
+    "out": {
+        "fluid": "steady",
+        "mesh": "mesh",
+        "solid": "gr_restart"
+    },
+    "paths": {
+        "exe": "/svfsi",
+        "in_geo": "/svfsi/svFSGe/in_geo",
+        "in_petsc": "/svfsi/svFSGe/in_petsc",
+        "in_svfsi": "/svfsi/svFSGe/in_svfsi_plus",
+        "root": "/svfsi/svFSGe"
+    },
+    "paths_darwin": {
+        "exe": "/Users/pfaller/work/repos",
+        "in_geo": "/Users/pfaller/work/repos/FSG/in_geo",
+        "in_petsc": "/Users/pfaller/work/repos/FSG/in_petsc",
+        "in_svfsi": "/Users/pfaller/work/repos/FSG/in_svfsi_plus",
+        "root": "."
+    },
+    "paths_linux_centos": {
+        "exe": "/home/users/pfaller/work/repos",
+        "in_geo": "/home/users/pfaller/work/repos/FSG/in_geo",
+        "in_petsc": "/home/users/pfaller/work/repos/FSG/in_petsc",
+        "in_svfsi": "/home/users/pfaller/work/repos/FSG/in_svfsi_plus",
+        "root": "."
+    },
+    "paths_linux_ubuntu": {
+        "exe": "/svfsi",
+        "in_geo": "/svfsi/svFSGe/in_geo",
+        "in_petsc": "/svfsi/svFSGe/in_petsc",
+        "in_svfsi": "/svfsi/svFSGe/in_svfsi_plus",
+        "root": "/svfsi/svFSGe"
+    },
+    "predict_file": false,
+    "re": 260.7484384504004,
+    "tortuosity": false
+}

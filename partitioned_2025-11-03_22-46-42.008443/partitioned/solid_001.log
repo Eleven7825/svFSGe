@@ -1,0 +1,36 @@
+hwloc/linux: Ignoring PCI device with non-16bit domain.
+Pass --enable-32bits-pci-domain to configure to support such devices
+(warning: it would break the library ABI, don't enable unless really needed).
+WARNING: No 'gr_restart/stFile_last.bin' file to restart simulation from; Resetting restart flag to false---------------------------------------------------------------------
+ Eq     N-i     T       dB  Ri/R1   Ri/R0    R/Ri     lsIt   dB  %t
+---------------------------------------------------------------------
+ <PETSC_INITIALIZE>: use linear solver config. from file.
+ GR 1-1  2.040e-01  [0 1.000e+00 1.000e+00 5.152e-19]  [1 -421 31]
+ GR 1-2  4.010e-01  !54 5.152e+02 5.152e+02 1.000e-21!  [1 -484 28]
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  [gr_equilibrated] Negative Jacobian
+[7a278a1c0bb5:93991] *** Process received signal ***
+[7a278a1c0bb5:93991] Signal: Aborted (6)
+[7a278a1c0bb5:93991] Signal code:  (-6)
+[7a278a1c0bb5:93991] [ 0] /lib/x86_64-linux-gnu/libc.so.6(+0x42520)[0x73904cc8d520]
+[7a278a1c0bb5:93991] [ 1] /lib/x86_64-linux-gnu/libc.so.6(pthread_kill+0x12c)[0x73904cce19fc]
+[7a278a1c0bb5:93991] [ 2] /lib/x86_64-linux-gnu/libc.so.6(raise+0x16)[0x73904cc8d476]
+[7a278a1c0bb5:93991] [ 3] /lib/x86_64-linux-gnu/libc.so.6(abort+0xd3)[0x73904cc737f3]
+[7a278a1c0bb5:93991] [ 4] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xa2b9e)[0x73904cf36b9e]
+[7a278a1c0bb5:93991] [ 5] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xae20c)[0x73904cf4220c]
+[7a278a1c0bb5:93991] [ 6] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xae277)[0x73904cf42277]
+[7a278a1c0bb5:93991] [ 7] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xae4d8)[0x73904cf424d8]
+[7a278a1c0bb5:93991] [ 8] /svfsi/svFSI-build/svFSI-build/bin/svFSI(+0x158f5a)[0x5ae9e10e3f5a]
+[7a278a1c0bb5:93991] [ 9] /svfsi/svFSI-build/svFSI-build/bin/svFSI(_ZN2gr16struct_3d_carrayER6ComModidRK6VectorIdERK5ArrayIdES9_RS3_RS7_SB_R6Array3IdEbb+0x418)[0x5ae9e1205838]
+[7a278a1c0bb5:93991] [10] /svfsi/svFSI-build/svFSI-build/bin/svFSI(_ZN2gr7eval_grERKiR6ComModRK7mshTypeRK5ArrayIdER6VectorIiERS8_R6Array3IdEbb+0x9a9)[0x5ae9e1206ca9]
+[7a278a1c0bb5:93991] [11] /svfsi/svFSI-build/svFSI-build/bin/svFSI(_ZN2gr12construct_grER6ComModRK7mshTypeRK5ArrayIdEb+0x308)[0x5ae9e1207878]
+[7a278a1c0bb5:93991] [12] /svfsi/svFSI-build/svFSI-build/bin/svFSI(_Z16iterate_solutionP10Simulation+0xcec)[0x5ae9e121a05c]
+[7a278a1c0bb5:93991] [13] /svfsi/svFSI-build/svFSI-build/bin/svFSI(main+0x209)[0x5ae9e112cd09]
+[7a278a1c0bb5:93991] [14] /lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x73904cc74d90]
+[7a278a1c0bb5:93991] [15] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x73904cc74e40]
+[7a278a1c0bb5:93991] [16] /svfsi/svFSI-build/svFSI-build/bin/svFSI(_start+0x25)[0x5ae9e1140585]
+[7a278a1c0bb5:93991] *** End of error message ***
+--------------------------------------------------------------------------
+prterun noticed that process rank 0 with PID 93991 on node 7a278a1c0bb5 exited on
+signal 6 (Aborted).
+--------------------------------------------------------------------------

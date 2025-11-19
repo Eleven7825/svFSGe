@@ -378,11 +378,21 @@ class svFSI(Simulation):
 
         # set wss (MAGNITUDE SENSING - unchanged from master)
         props = v2n(solid.GetPointData().GetArray(name))
+
+        # Expand props to 14 columns if needed (to add WSS gradient at index 13)
+        if props.shape[1] < 14:
+            props_new = np.zeros((props.shape[0], 14))
+            props_new[:, :props.shape[1]] = props
+            props = props_new
+
         props[:, 6] = wss_mag
 
-        # Compute WSS gradient for tracking (not used for sensing)
+        # Compute WSS gradient for tracking AND passing to C++
         wss_grad = self.compute_axial_wss_gradient(wss_mag)
         max_wss_grad = np.max(np.abs(wss_grad))
+
+        # Pass WSS gradient magnitude to C++ via props[:, 13]
+        props[:, 13] = np.abs(wss_grad)
 
         # Store tracking data for calibration
         self.tracking_data["time_steps"].append(t)

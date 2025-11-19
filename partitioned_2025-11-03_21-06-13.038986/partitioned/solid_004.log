@@ -1,0 +1,12 @@
+hwloc/linux: Ignoring PCI device with non-16bit domain.
+Pass --enable-32bits-pci-domain to configure to support such devices
+(warning: it would break the library ABI, don't enable unless really needed).
+---------------------------------------------------------------------
+ Eq     N-i     T       dB  Ri/R1   Ri/R0    R/Ri     lsIt   dB  %t
+---------------------------------------------------------------------
+ <PETSC_INITIALIZE>: use linear solver config. from file.
+ GR 4-1  2.679e+00  [0 1.000e+00 4.256e-02 1.849e-17]  [1 -385 2]
+ GR 4-2  2.909e+00  [-20 9.507e-02 4.046e-03 1.945e-16]  [1 -362 24]
+ GR 4-3  3.136e+00  [-63 6.688e-04 2.846e-05 2.765e-14]  [1 -312 23]
+ GR 4-4  3.364e+00  [-143 6.819e-08 2.902e-09 2.712e-10]  [1 -220 23]
+ GR 4-5s 3.596e+00  [-278 1.206e-14 5.132e-16 1.534e-03]  [1 -65 23]
