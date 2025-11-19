@@ -376,12 +376,12 @@ class svFSI(Simulation):
         # get WSS magnitude
         wss_mag = self.curr.get(("solid", "wss", "vol"))
 
-        # set wss (MAGNITUDE SENSING - unchanged from master)
+        # set wss (GRADIENT SENSING)
         props = v2n(solid.GetPointData().GetArray(name))
 
-        # Expand props to 14 columns if needed (to add WSS gradient at index 13)
-        if props.shape[1] < 14:
-            props_new = np.zeros((props.shape[0], 14))
+        # Expand props to 15 columns if needed (to add WSS gradient and baseline)
+        if props.shape[1] < 15:
+            props_new = np.zeros((props.shape[0], 15))
             props_new[:, :props.shape[1]] = props
             props = props_new
 
@@ -393,6 +393,11 @@ class svFSI(Simulation):
 
         # Pass WSS gradient magnitude to C++ via props[:, 13]
         props[:, 13] = np.abs(wss_grad)
+
+        # Pass baseline WSS gradient to C++ via props[:, 14] (for gradient sensing)
+        # This value can be modified without recompiling C++
+        tau_grad_o = 1.4e-3  # Pa/mm - baseline WSS gradient
+        props[:, 14] = tau_grad_o
 
         # Store tracking data for calibration
         self.tracking_data["time_steps"].append(t)
