@@ -4,7 +4,7 @@
     "tortuosity": false,
     "mesh": "fsg_full_coarse.json",
     "n_procs": {
-        "fluid": 8,
+        "fluid": 6,
         "mesh": 1,
         "solid": 1
     },
@@ -33,9 +33,9 @@
     "fmax": 1.0,
     "predict_file": false,
     "exe": {
-        "fluid": "svFSIplus_fork/build/svFSI-build/bin/svFSI",
-        "mesh": "svFSIplus_fork/build/svFSI-build/bin/svFSI",
-        "solid": "svFSIplus_fork/build/svFSI-build/bin/svFSI"
+        "fluid": "/svfsi/svFSI-build/bin/svFSI",
+        "mesh": "/svfsi/svFSI-build/bin/svFSI",
+        "solid": "/svfsi/svFSI-build/bin/svFSI"
     },
     "inp": {
         "fluid": "steady_full.xml",
@@ -60,10 +60,10 @@
     },
     "name": "partitioned",
     "paths_linux_ubuntu": {
-        "in_geo": "/home/pfaller/work/repos/FSG/in_geo",
-        "in_petsc": "/home/pfaller/work/repos/FSG/in_petsc",
-        "in_svfsi": "/home/pfaller/work/repos/FSG/in_svfsi_plus",
-        "exe": "/home/pfaller/work/repos",
+        "in_geo": "/svFSGe/in_geo",
+        "in_petsc": "/svFSGe/in_petsc",
+        "in_svfsi": "/svFSGe/in_svfsi_plus",
+        "exe": "/",
         "root": "."
     },
     "paths_linux_centos": {
