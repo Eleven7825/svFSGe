@@ -19,13 +19,13 @@ from vtk.util.numpy_support import vtk_to_numpy as v2n
 from svfsi import svFSI
 from vtk_functions import read_geo, threshold
 
-# use LaTeX in text
+# use LaTeX in text (disabled to avoid LaTeX dependency)
 plt.rcParams.update(
     {
-        "text.usetex": True,
-        "font.family": "serif",
-        "font.serif": "Computer Modern Roman",
-        "font.size": 21,
+        "text.usetex": False,
+        #"font.family": "serif",
+        #"font.serif": "Computer Modern Roman",
+        #"font.size": 21,
     }
 )
 # plt.style.use("fivethirtyeight")
@@ -33,33 +33,33 @@ plt.rcParams.update(
 # field descriptions
 f_labels = {
     "disp": [
-        "Disp. $d_\\theta$ [°]",
+        r"Disp. $d_\theta$ [°]",
         "Disp. $d_r$ [mm]",
         "Disp. $d_z$ [mm]",
     ],
     "disp_r": ["Disp. $d_r$ [mm]"],
-    "thick": ["Thickness [$\mu$m]"],
+    "thick": [r"Thickness [$\mu$m]"],
     "stim": [
-        "Gain ratio $K_{\\tau\sigma,h}$ [-]",
-        "Stim. $\Delta\sigma_I$ [-]",
-        "Stim. $\Delta\\tau_w$ [-]",
+        r"Gain ratio $K_{\tau\sigma,h}$ [-]",
+        r"Stim. $\Delta\sigma_I$ [-]",
+        r"Stim. $\Delta\tau_w$ [-]",
     ],
     "jac": ["Jacobian [-]"],
     "pk2": [
-        "2PK $S_{\\theta\\theta}$ [kPa]",
+        r"2PK $S_{\theta\theta}$ [kPa]",
         "2PK $S_{rr}$ [kPa]",
         "2PK $S_{zz}$ [kPa]",
     ],
     "lagrange": ["Lagrange $p$ [kPa]"],
-    "phic": ["Collagen $\phi^c_h$ [-]"],
-    "phic_curr": ["Collagen $\phi^c_h J_h$ [-]"],
+    "phic": [r"Collagen $\phi^c_h$ [-]"],
+    "phic_curr": [r"Collagen $\phi^c_h J_h$ [-]"],
     "pressure": ["Pressure [mmHg]"],
     "velocity": ["Velocity $u$ [mm/s]"],
 }
-s_labels = {"KsKi": "Gain ratio $K_{\\tau\sigma,o}$ [-]"}
+s_labels = {r"KsKi": r"Gain ratio $K_{\tau\sigma,o}$ [-]"}
 f_comp = {key: len(value) for key, value in f_labels.items()}
 f_scales = {"disp": np.array([180.0 / np.pi, 1.0, 1.0]), "thick": [1e3], "pressure": [1.0/0.1333]}
-titles = {"gr": "G\&R", "partitioned": "FSGe"}
+titles = {"gr": r"G\&R", "partitioned": "FSGe"}
 fields = {"fluid": ["pressure", "velocity"],
     "solid": ["disp_r", "disp", "thick", "stim", "jac", "pk2", "lagrange", "phic", "phic_curr"]}
 
@@ -415,7 +415,7 @@ def plot_single(data, coords, param, out, study, quant, locations, time=-1):
         for j_data in range(f_comp[quant]):
             title = titles[n.split("_")[0]]
             if study == "single":
-                title += ", $K_{\\tau\sigma,o} = " + param[n]["KsKi"] + "$"
+                title += r", $K_{\tau\sigma,o} = " + param[n]["KsKi"] + "$"
 
             if ny == 1 and nx == 1:
                 pos = i_data
@@ -673,7 +673,7 @@ def main_convergence(folder):
     param = []
     for f in inp.keys():
         kski = data[f]["KsKi"]
-        labels += ["$K_{\\tau\sigma,o}$ = " + kski]
+        labels += [r"$K_{\tau\sigma,o}$ = " + kski]
         n_it = []
         for err in data[f]["error"]:
             n_it += [len(err)]
@@ -705,6 +705,76 @@ def main_convergence(folder):
     plt.tight_layout()
     fig.savefig(os.path.join(out, "convergence.pdf"), bbox_inches="tight")
     plt.cla()
+
+
+def plot_gradient_tracking(csv_file, out_dir=None):
+    """
+    Plot gradient tracking data for magnitude-with-gradient-tracking branch.
+
+    Creates two separate plots:
+    1. max(|grad(WSS)|) vs time
+    2. tau/tau_o vs time
+
+    Args:
+        csv_file: Path to gradient_tracking.csv file
+        out_dir: Output directory for plots (default: same as csv_file)
+    """
+    import csv
+
+    # Read CSV data
+    time_steps = []
+    max_wss_grad = []
+    tau_ratio = []
+
+    with open(csv_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            time_steps.append(float(row['time_step']))
+            max_wss_grad.append(float(row['max_wss_gradient']))
+            tau_ratio.append(float(row['tau_tau_o_ratio']))
+
+    time_steps = np.array(time_steps)
+    max_wss_grad = np.array(max_wss_grad)
+    tau_ratio = np.array(tau_ratio)
+
+    # Set output directory
+    if out_dir is None:
+        out_dir = os.path.dirname(csv_file)
+
+    # Plot 1: max WSS gradient vs time
+    fig1, ax1 = plt.subplots(figsize=(10, 6), dpi=300)
+    ax1.plot(time_steps, max_wss_grad, 'b-', linewidth=2, marker='o', markersize=4)
+    ax1.set_xlabel('Time Step')
+    ax1.set_ylabel(r'Max $|\nabla \tau_w|$ [Pa/mm]')
+    ax1.set_title('Maximum WSS Gradient vs Time')
+    ax1.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig1.savefig(os.path.join(out_dir, "max_wss_gradient_vs_time.pdf"), bbox_inches="tight")
+    print(f"Saved: {os.path.join(out_dir, 'max_wss_gradient_vs_time.pdf')}")
+    plt.close(fig1)
+
+    # Plot 2: tau/tau_o vs time
+    fig2, ax2 = plt.subplots(figsize=(10, 6), dpi=300)
+    # Filter out zeros (before tau_o is set)
+    valid_idx = tau_ratio > 0
+    if np.any(valid_idx):
+        ax2.plot(time_steps[valid_idx], tau_ratio[valid_idx], 'r-', linewidth=2, marker='s', markersize=4)
+    ax2.set_xlabel('Time Step')
+    ax2.set_ylabel(r'$\tau / \tau_o$ [-]')
+    ax2.set_title('WSS Ratio vs Time (Magnitude Sensing)')
+    ax2.axhline(y=1.0, color='k', linestyle='--', linewidth=1, alpha=0.5, label='Homeostasis')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    plt.tight_layout()
+    fig2.savefig(os.path.join(out_dir, "tau_tau_o_vs_time.pdf"), bbox_inches="tight")
+    print(f"Saved: {os.path.join(out_dir, 'tau_tau_o_vs_time.pdf')}")
+    plt.close(fig2)
+
+    return {
+        'time_steps': time_steps,
+        'max_wss_grad': max_wss_grad,
+        'tau_ratio': tau_ratio
+    }
 
 
 if __name__ == "__main__":
