@@ -4,13 +4,44 @@
 [arXiv:2404.14187](https://arxiv.org/abs/2404.14187)
 
 ## Quickstart
+1. Install docker and pull the svMultiphyiscs image from 
+```bash
+docker pull simvascular/solver:latest
+```
+Make two directories, one for svMultiPhysics(svfsi), one for svFSGe:
+```bash
+mkdir svFSGe && mkdir svMultiPhysics
+```
 
-1. Install `svFSIplus` from [this branch](https://github.com/mrp089/svFSIplus/commit/e05e3f95b375329458b2e5f2d1f5ed5fb97df3d5) (including PETSc with MUMPS)
-2. Adapt paths in `in_sim/partitioned_full.json`
-3. Run
+Start a new svMultiphysics container by:
+
+```bash
+docker run -it --user $(id -u):$(id -g) \
+           -v ./svMultiPhysics:/svfsi \
+           -v ./svFSGe:/svFSGe        \
+              simvascular/solver:latest /bin/bash
+```
+2. Inside the container, install `svFSIplus` from [this branch](https://github.com/Eleven7825/svMultiPhysics/tree/FSGe), to build svfsi, you need to run(inside docker, command line begins with #):
+```bash
+cd /svfsi
+git init
+git remote add origin https://github.com/Eleven7825/svMultiPhysics.git
+git fetch origin FSGe
+git checkout -b FSGe origin/FSGe
+```
+
+At the /svfsi directory, build it with
+```bash
+bash makeCommand.sh
+```
+
+3. Stil inside the container, you need to adapt paths in `/svFSGe/in_sim/partitioned_full.json` to make sure they are correct
+4. Run
     ```bash
     ./fsg.py in_sim/partitioned_full.json
     ```
+You need install neccessary python packages. 
+
 ## File overview
 
 - `cylinder.py` generates structured FSI hex-meshes with configuration files in `in_geo`
