@@ -40,7 +40,7 @@ bash makeCommand.sh
     ```bash
     ./fsg.py in_sim/partitioned_full.json
     ```
-You need install neccessary python packages. 
+You need to install neccessary python packages. 
 
 ## File overview
 
