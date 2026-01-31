@@ -1,0 +1,147 @@
+name: FSGe CI Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches-ignore:
+      - master
+      - main
+
+jobs:
+  test-fsg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create directories for volumes
+        run: |
+          mkdir -p svMultiPhysics
+          mkdir -p test_output
+
+      - name: Pull Docker image
+        run: |
+          docker pull simvascular/solver:latest
+
+      - name: Run FSGe test in Docker container
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/svMultiPhysics:/svfsi \
+            -v ${{ github.workspace }}:/svFSGe \
+            simvascular/solver:latest \
+            /bin/bash -c '
+              set -e
+
+              echo "================================"
+              echo "Cloning svMultiPhysics..."
+              echo "================================"
+              cd /svfsi
+              git init
+              git remote add origin https://github.com/Eleven7825/svMultiPhysics.git
+              git fetch --depth=1 origin FSGe
+              git checkout -b FSGe origin/FSGe
+
+              echo ""
+              echo "================================"
+              echo "Building svFSIplus..."
+              echo "================================"
+              bash makeCommand.sh
+
+              echo ""
+              echo "================================"
+              echo "Installing Python dependencies..."
+              echo "================================"
+              pip install numpy vtk matplotlib scipy
+
+              echo ""
+              echo "================================"
+              echo "Running FSGe test (nmax=2)..."
+              echo "================================"
+              cd /svFSGe
+              python3 ./fsg.py in_sim/partitioned_test.json
+
+              echo ""
+              echo "================================"
+              echo "Copying results..."
+              echo "================================"
+              # Find the most recent partitioned directory
+              RESULT_DIR=$(ls -dt partitioned_* 2>/dev/null | head -1)
+              if [ -z "$RESULT_DIR" ]; then
+                echo "ERROR: No partitioned results directory found!"
+                exit 1
+              fi
+
+              echo "Found results in: $RESULT_DIR"
+              cp -r "$RESULT_DIR" /svFSGe/test_output/
+
+              echo ""
+              echo "Test execution completed successfully!"
+            '
+
+      - name: List test output
+        run: |
+          echo "Test output directory contents:"
+          ls -la test_output/
+          if [ -d test_output/partitioned_* ]; then
+            echo ""
+            echo "Partitioned directory contents:"
+            ls -la test_output/partitioned_*/
+          fi
+
+      - name: Compare results with reference
+        run: |
+          echo "================================"
+          echo "Comparing test results with reference baseline..."
+          echo "================================"
+
+          # Find the partitioned directory in test_output
+          RESULT_DIR=$(ls -dt test_output/partitioned_* 2>/dev/null | head -1)
+
+          if [ -z "$RESULT_DIR" ]; then
+            echo "ERROR: No test results found in test_output/"
+            exit 1
+          fi
+
+          echo "Test results: $RESULT_DIR/partitioned.json"
+          echo "Reference: test_reference/nmax_2/reference_results.json"
+          echo ""
+
+          python3 scripts/compare_results.py \
+            test_reference/nmax_2/reference_results.json \
+            "$RESULT_DIR/partitioned.json"
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fsg-test-results
+          path: |
+            test_output/
+            !test_output/**/partitioned/fluid_*.vtu
+            !test_output/**/partitioned/solid_*.vtu
+            !test_output/**/partitioned/mesh_*.vtu
+          retention-days: 30
+
+      - name: Upload convergence plot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: convergence-plot
+          path: test_output/**/convergence.png
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "================================"
+          echo "Test Summary"
+          echo "================================"
+          echo "Status: ${{ job.status }}"
+          echo "Workflow: ${{ github.workflow }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Run number: ${{ github.run_number }}"
+          echo "================================"
