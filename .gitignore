@@ -5,6 +5,5 @@
 *.swp
 __pycache__
 *.vt*
-*.txt
 partitioned_*/
 test_output/

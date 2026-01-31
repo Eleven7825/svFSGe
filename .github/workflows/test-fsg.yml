@@ -60,7 +60,7 @@ jobs:
               echo "================================"
               echo "Installing Python dependencies..."
               echo "================================"
-              pip install numpy vtk matplotlib scipy xmltodict distro 2>&1 | tee /svFSGe/test_output/pip_install.log
+              pip install -r /svFSGe/requirements.txt 2>&1 | tee /svFSGe/test_output/pip_install.log
 
               echo ""
               echo "================================"

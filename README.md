@@ -35,17 +35,72 @@ At the /svfsi directory, build it with
 bash makeCommand.sh
 ```
 
-3. Stil inside the container, you need to adapt paths in `/svFSGe/in_sim/partitioned_full.json` to make sure they are correct
-4. Run
-    ```bash
-    ./fsg.py in_sim/partitioned_full.json
-    ```
-You need install neccessary python packages. 
+3. Install required Python packages (inside the container):
+```bash
+# Option 1: Install from requirements.txt (recommended)
+pip install -r /svFSGe/requirements.txt
+
+# Option 2: Install individually
+pip install numpy vtk matplotlib scipy xmltodict distro
+```
+
+4. Still inside the container, you need to adapt paths in `/svFSGe/in_sim/partitioned_full.json` to make sure they are correct
+
+5. Run the simulation:
+```bash
+cd /svFSGe
+python3 ./fsg.py in_sim/partitioned_full.json
+```
+
+## Quick Setup Script
+
+For convenience, use the provided setup script to automate Docker environment setup:
+
+```bash
+# From the svFSGe directory
+./scripts/setup_docker.sh
+```
+
+This script will:
+- Create necessary directories
+- Start Docker container with proper mounts
+- Clone and build svFSIplus
+- Install Python dependencies
+- Provide an interactive shell ready to run simulations 
+
+## Continuous Integration
+
+GitHub Actions automatically tests FSGe on every pull request and branch push:
+- **Test configuration**: `in_sim/partitioned_test.json` (nmax=2 for faster testing)
+- **Workflow**: `.github/workflows/test-fsg.yml`
+- **Comparison**: Validates convergence metrics against reference baseline
+- **Runtime**: ~45-90 minutes (build + test)
+
+See `test_reference/nmax_2/README.md` for details on reference data.
+
+## Required Python Packages
+
+The following Python packages are required (see `requirements.txt`):
+- `numpy` - Numerical computations
+- `vtk` - VTK file I/O and visualization
+- `matplotlib` - Plotting and visualization
+- `scipy` - Scientific computing
+- `xmltodict` - XML parsing for configuration files
+- `distro` - Linux distribution detection
+
+Install options:
+```bash
+# Recommended: Install from requirements.txt
+pip install -r requirements.txt
+
+# Alternative: Install individually
+pip install numpy vtk matplotlib scipy xmltodict distro
+```
 
 ## File overview
 
 - `cylinder.py` generates structured FSI hex-meshes with configuration files in `in_geo`
-- `fsg.py` runs partiotioned FSGe coupling using svFSIplus with
+- `fsg.py` runs partitioned FSGe coupling using svFSIplus with
   - `in_sim` FSGe configuration files
   - `in_svfsi_plus` svFSIplus input files
   - `in_petsc` PETSc linear solver settings
@@ -53,4 +108,6 @@ You need install neccessary python packages.
 - `svfsi.py` sets up, executes, and processes svFSIplus simulations
 - `utilities.py` IQN-ILS filtering
 - `vtk_functions.py` useful VTK functions for file IO
-- `scripts` more or less useful scripts
+- `scripts/` utility scripts including:
+  - `compare_results.py` - CI test comparison script
+  - `setup_docker.sh` - Automated Docker environment setup
