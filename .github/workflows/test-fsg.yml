@@ -4,9 +4,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches-ignore:
-      - master
-      - main
+    branches:
+      - '**'
 
 jobs:
   test-fsg:
