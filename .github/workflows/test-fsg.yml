@@ -39,6 +39,11 @@ jobs:
               echo "================================"
               echo "Cloning svMultiPhysics..."
               echo "================================"
+
+              # Fix Git ownership issues in Docker
+              git config --global --add safe.directory /svfsi
+              git config --global --add safe.directory /svFSGe
+
               cd /svfsi
               git init
               git remote add origin https://github.com/Eleven7825/svMultiPhysics.git
