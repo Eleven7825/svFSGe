@@ -120,6 +120,10 @@ jobs:
             echo "No partitioned results found in test_output/"
           fi
 
+      - name: Install comparison dependencies
+        if: success()
+        run: pip install numpy meshio
+
       - name: Compare results with reference
         if: success()
         run: |
