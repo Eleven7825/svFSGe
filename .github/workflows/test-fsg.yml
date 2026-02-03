@@ -142,7 +142,9 @@ jobs:
 
           python3 scripts/compare_results.py \
             test_reference/nmax_2/reference_results.json \
-            "$RESULT_DIR/partitioned.json"
+            "$RESULT_DIR/partitioned.json" \
+            --ref-vtu test_reference/nmax_2/tube_002.vtu \
+            --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu"
 
       - name: Upload test artifacts
         if: always()

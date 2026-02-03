@@ -74,28 +74,9 @@ GitHub Actions automatically tests FSGe on every pull request and branch push:
 - **Test configuration**: `in_sim/partitioned_test.json` (nmax=2 for faster testing)
 - **Workflow**: `.github/workflows/test-fsg.yml`
 - **Comparison**: Validates convergence metrics against reference baseline
-- **Runtime**: ~45-90 minutes (build + test)
 
 See `test_reference/nmax_2/README.md` for details on reference data.
 
-## Required Python Packages
-
-The following Python packages are required (see `requirements.txt`):
-- `numpy` - Numerical computations
-- `vtk` - VTK file I/O and visualization
-- `matplotlib` - Plotting and visualization
-- `scipy` - Scientific computing
-- `xmltodict` - XML parsing for configuration files
-- `distro` - Linux distribution detection
-
-Install options:
-```bash
-# Recommended: Install from requirements.txt
-pip install -r requirements.txt
-
-# Alternative: Install individually
-pip install numpy vtk matplotlib scipy xmltodict distro
-```
 
 ## File overview
 

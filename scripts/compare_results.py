@@ -18,6 +18,8 @@ import json
 import argparse
 from pathlib import Path
 
+import numpy as np
+
 
 class ComparisonError(Exception):
     """Custom exception for comparison failures."""
@@ -196,6 +198,77 @@ def compare_error_norms(ref_data, test_data, rel_tolerance=0.10):
     return True
 
 
+def load_vtu(filepath):
+    """Load a VTU file and return point-data as a dict of numpy arrays."""
+    import meshio
+    mesh = meshio.read(str(filepath))
+    return mesh.point_data
+
+
+# Relative tolerances from svMultiPhysics conftest.py
+# https://github.com/SimVascular/svMultiPhysics/blob/main/tests/conftest.py
+RTOL = {
+    "Displacement": 1.0e-10,
+    "Velocity":     1.0e-7,
+}
+
+
+def compare_vtu(ref_path, test_path):
+    """
+    Compare physical fields in two VTU files using the element-wise
+    criterion from svMultiPhysics (conftest.py):
+
+        |test - ref| <= rtol + rtol * |ref|
+
+    i.e. rtol is used as both atol and rtol (same as np.isclose with
+    atol=rtol).  Raises ComparisonError if any field has points outside
+    the tolerance.
+    """
+    print(f"  Loading reference VTU: {ref_path}")
+    ref_data = load_vtu(ref_path)
+    print(f"  Loading test VTU:      {test_path}")
+    test_data = load_vtu(test_path)
+
+    print()
+    print("  Field-by-field comparison:")
+
+    msg = ""
+    for field, rtol in RTOL.items():
+        if field not in ref_data:
+            print(f"    ? {field:20s} not in reference – skipped")
+            continue
+        if field not in test_data:
+            raise ComparisonError(f"Field '{field}' missing in test VTU")
+
+        a = test_data[field].flatten().astype(float)
+        b = ref_data[field].flatten().astype(float)
+
+        # Element-wise criterion (mirrors conftest.py exactly):
+        #   rel_diff = |a - b| - rtol - rtol * |b|
+        # A point passes when rel_diff <= 0.
+        rel_diff = np.abs(a - b) - rtol - rtol * np.abs(b)
+
+        close = rel_diff <= 0.0
+        if np.all(close):
+            print(f"    ✓ {field:20s} all points within rtol={rtol:.0e}")
+        else:
+            wrong   = 1.0 - np.sum(close) / close.size
+            i_max   = rel_diff.argmax()
+            max_rel = rel_diff[i_max]
+            max_abs = np.abs(a[i_max] - b[i_max])
+
+            print(f"    ✗ {field:20s} {wrong:.1%} of points exceed rtol={rtol:.0e}  "
+                  f"(max rel_diff={max_rel:.2e}, max abs={max_abs:.2e})")
+
+            msg += (f"  {field}: {wrong:.1%} of points exceed rtol={rtol:.0e}. "
+                    f"Max rel_diff={max_rel:.2e}, max abs diff={max_abs:.2e}\n")
+
+    if msg:
+        raise ComparisonError(
+            "VTU field differences exceed tolerance:\n" + msg.rstrip()
+        )
+
+
 def print_summary(ref_data, test_data):
     """Print comparison summary."""
     print("=" * 70)
@@ -264,6 +337,18 @@ def main():
         default=0.10,
         help="Error norm relative tolerance (default: 0.10 = 10%%)"
     )
+    parser.add_argument(
+        "--ref-vtu",
+        type=Path,
+        default=None,
+        help="Path to reference VTU file (enables field comparison)"
+    )
+    parser.add_argument(
+        "--test-vtu",
+        type=Path,
+        default=None,
+        help="Path to test VTU file (required when --ref-vtu is given)"
+    )
 
     args = parser.parse_args()
 
@@ -301,6 +386,17 @@ def main():
         compare_error_norms(ref_data, test_data, args.error_tolerance)
         print("   ✓ PASS: Error norms within tolerance")
         print()
+
+        if args.ref_vtu or args.test_vtu:
+            if not (args.ref_vtu and args.test_vtu):
+                raise ComparisonError(
+                    "Both --ref-vtu and --test-vtu must be provided together"
+                )
+            print("4. Comparing VTU fields...")
+            compare_vtu(args.ref_vtu, args.test_vtu)
+            print()
+            print("   ✓ PASS: VTU fields within tolerance")
+            print()
 
         print("=" * 70)
         print("OVERALL RESULT: PASS ✓")
