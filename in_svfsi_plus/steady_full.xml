@@ -71,9 +71,9 @@
    <Add_BC name="f_start" > 
       <Type> Dir </Type> 
       <Profile> Parabolic </Profile> 
-      <Value> -1000.0 </Value> 
-      <!-- <Temporal_values_file_path> steady_flow.dat </Temporal_values_file_path>  -->
-      <!-- <Time_dependence> General </Time_dependence> -->
+      <!-- <Value> -1000.0 </Value> --> 
+      <Temporal_values_file_path> pulsatile_flow.dat </Temporal_values_file_path>
+      <Time_dependence> Unsteady </Time_dependence>
       <!-- <Temporal_and_spatial_values_file_path> inflow_vector.dat </Temporal_and_spatial_values_file_path>  -->
       <Zero_out_perimeter> false </Zero_out_perimeter> 
    </Add_BC> 
