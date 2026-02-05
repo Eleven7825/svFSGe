@@ -4,7 +4,7 @@
 <GeneralSimulationParameters>
   <Continue_previous_simulation> 1 </Continue_previous_simulation>
   <Number_of_spatial_dimensions> 3 </Number_of_spatial_dimensions> 
-  <Number_of_time_steps> 10 </Number_of_time_steps>
+  <Number_of_time_steps> 960 </Number_of_time_steps>
   <Number_of_new_time_steps> 10 </Number_of_new_time_steps>
   <Time_step_size> 0.01 </Time_step_size> 
   <Spectral_radius_of_infinite_time_step> 0.5 </Spectral_radius_of_infinite_time_step> 
