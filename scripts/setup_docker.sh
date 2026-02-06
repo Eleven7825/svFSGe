@@ -100,19 +100,57 @@ else
     docker pull simvascular/solver:latest
 fi
 
-# Create Docker run script
-print_step "Starting Docker container..."
+# Container name for persistence
+CONTAINER_NAME="fsg-dev"
 
-if [ "$INTERACTIVE" = true ]; then
-    echo "Starting interactive Docker session..."
-    echo "This will set up the environment and drop you into a shell."
+# Check if container already exists
+if docker ps -a -q -f name="^${CONTAINER_NAME}$" | grep -q .; then
+    print_step "Found existing container: $CONTAINER_NAME"
+
+    # Check if container is running
+    if docker ps -q -f name="^${CONTAINER_NAME}$" | grep -q .; then
+        echo "✓ Container is already running"
+    else
+        echo "Starting stopped container..."
+        docker start $CONTAINER_NAME
+        echo "✓ Container started"
+    fi
+
+    echo ""
+    echo "Entering container shell..."
+    echo "To exit: type 'exit' or press Ctrl+D"
     echo ""
 
-    docker run -it --rm \
+    # Exec into existing container
+    docker exec -it $CONTAINER_NAME /bin/bash
+
+    echo ""
+    print_step "Done!"
+    exit 0
+fi
+
+# Create Docker run script
+print_step "Creating new persistent container: $CONTAINER_NAME"
+
+if [ "$INTERACTIVE" = true ]; then
+    echo "This will set up the environment and drop you into a shell."
+    echo "Container will persist after exit - rerun this script to reconnect."
+    echo ""
+
+    # Start container in detached mode with infinite sleep
+    docker run -d --name $CONTAINER_NAME \
         -v "$PROJECT_DIR/../svMultiPhysics:/svfsi" \
         -v "$PROJECT_DIR:/svFSGe" \
         simvascular/solver:latest \
-        /bin/bash -c "
+        sleep infinity
+
+    echo "✓ Container created"
+    echo ""
+
+    # Run setup commands inside the container
+    print_step "Running initial setup inside container..."
+
+    docker exec $CONTAINER_NAME /bin/bash -c "
             set -e
 
             echo '================================='
@@ -151,7 +189,8 @@ if [ "$INTERACTIVE" = true ]; then
             echo '================================='
             echo 'Installing Python dependencies...'
             echo '================================='
-            pip install -q numpy vtk matplotlib scipy xmltodict distro
+            cd /svFSGe
+            pip install -q -r requirements.txt
             echo '✓ Python packages installed'
 
             echo ''
@@ -170,36 +209,66 @@ if [ "$INTERACTIVE" = true ]; then
                 echo '  python3 ./fsg.py in_sim/partitioned_full.json'
             fi
             echo ''
-            echo 'To exit: type exit or press Ctrl+D'
-            echo ''
-
-            # Start interactive shell
-            /bin/bash
         "
+
+    echo "✓ Initial setup complete"
+    echo ""
+
+    # Drop into interactive shell
+    print_step "Entering container shell..."
+    echo "To exit: type 'exit' or press Ctrl+D"
+    echo "Tip: The container persists. Rerun this script to reconnect."
+    echo ""
+
+    docker exec -it $CONTAINER_NAME /bin/bash
+
 else
     # Non-interactive mode (for scripting)
-    docker run --rm \
+    echo "Starting container in background..."
+
+    docker run -d --name $CONTAINER_NAME \
         -v "$PROJECT_DIR/../svMultiPhysics:/svfsi" \
         -v "$PROJECT_DIR:/svFSGe" \
         simvascular/solver:latest \
-        /bin/bash -c "
-            set -e
-            git config --global --add safe.directory /svfsi
-            git config --global --add safe.directory /svFSGe
-            cd /svfsi
-            if [ ! -d .git ]; then
-                git init
-                git remote add origin https://github.com/Eleven7825/svMultiPhysics.git
-                git fetch --depth=1 origin FSGe
-                git checkout -b FSGe origin/FSGe
-            fi
-            if [ ! -f svFSI-build/bin/svFSI ]; then
-                bash makeCommand.sh
-            fi
-            pip install -q numpy vtk matplotlib scipy xmltodict distro
-            echo 'Setup complete'
-        "
+        sleep infinity
+
+    echo "✓ Container created"
+    echo ""
+    print_step "Running setup in background..."
+
+    docker exec $CONTAINER_NAME /bin/bash -c "
+        set -e
+        git config --global --add safe.directory /svfsi
+        git config --global --add safe.directory /svFSGe
+        cd /svfsi
+        if [ ! -d .git ]; then
+            git init
+            git remote add origin https://github.com/Eleven7825/svMultiPhysics.git
+            git fetch --depth=1 origin FSGe
+            git checkout -b FSGe origin/FSGe
+        fi
+        if [ ! -f svFSI-build/bin/svFSI ]; then
+            bash makeCommand.sh
+        fi
+        cd /svFSGe
+        pip install -q -r requirements.txt
+        echo 'Setup complete'
+    "
+
+    echo "✓ Setup complete"
+    echo ""
+    echo "Container '$CONTAINER_NAME' is running in the background."
+    echo "To access it: docker exec -it $CONTAINER_NAME /bin/bash"
+    echo "To stop it: docker stop $CONTAINER_NAME"
+    echo "To remove it: docker rm -f $CONTAINER_NAME"
 fi
 
 echo ""
 print_step "Done!"
+echo ""
+echo "Container management commands:"
+echo "  Connect:  ./scripts/setup_docker.sh  (or: docker exec -it $CONTAINER_NAME /bin/bash)"
+echo "  Stop:     docker stop $CONTAINER_NAME"
+echo "  Start:    docker start $CONTAINER_NAME"
+echo "  Remove:   docker rm -f $CONTAINER_NAME"
+echo ""
