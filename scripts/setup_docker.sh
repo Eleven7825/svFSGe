@@ -189,8 +189,7 @@ if [ "$INTERACTIVE" = true ]; then
             echo '================================='
             echo 'Installing Python dependencies...'
             echo '================================='
-            cd /svFSGe
-            pip install -q -r requirements.txt
+            pip install -q numpy>=1.20.0 vtk>=9.0.0 matplotlib>=3.3.0 scipy>=1.6.0 xmltodict>=0.12.0 distro>=1.5.0 meshio>=5.0.0
             echo '✓ Python packages installed'
 
             echo ''
@@ -250,8 +249,7 @@ else
         if [ ! -f svFSI-build/bin/svFSI ]; then
             bash makeCommand.sh
         fi
-        cd /svFSGe
-        pip install -q -r requirements.txt
+        pip install -q numpy>=1.20.0 vtk>=9.0.0 matplotlib>=3.3.0 scipy>=1.6.0 xmltodict>=0.12.0 distro>=1.5.0 meshio>=5.0.0
         echo 'Setup complete'
     "
 
