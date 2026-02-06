@@ -88,7 +88,7 @@ echo ""
 
 # Create necessary directories
 print_step "Creating directories..."
-mkdir -p "$PROJECT_DIR/../svMultiPhysics"
+mkdir -p "$PROJECT_DIR/svMultiPhysics"
 echo "✓ Created svMultiPhysics directory"
 
 # Check if Docker image exists locally
