@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(python3:*)",
+      "Bash(dpkg:*)",
+      "Bash(/home/shiyi/ParaView-5.13.0-RC1-MPI-Linux-Python3.10-x86_64/bin/pvpython:*)",
+      "Bash(chmod:*)"
+    ]
+  }
+}
