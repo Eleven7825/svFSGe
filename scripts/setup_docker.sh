@@ -122,7 +122,8 @@ if docker ps -a -q -f name="^${CONTAINER_NAME}$" | grep -q .; then
     echo ""
 
     # Exec into existing container
-    docker exec -it $CONTAINER_NAME /bin/bash
+    TTY_FLAG=$([ -t 0 ] && echo "-it" || echo "-i")
+    docker exec $TTY_FLAG $CONTAINER_NAME /bin/bash
 
     echo ""
     print_step "Done!"
@@ -219,7 +220,8 @@ if [ "$INTERACTIVE" = true ]; then
     echo "Tip: The container persists. Rerun this script to reconnect."
     echo ""
 
-    docker exec -it $CONTAINER_NAME /bin/bash
+    TTY_FLAG=$([ -t 0 ] && echo "-it" || echo "-i")
+    docker exec $TTY_FLAG $CONTAINER_NAME /bin/bash
 
 else
     # Non-interactive mode (for scripting)
