@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import pdb
+import re
 import vtk
 import os
 import time
@@ -63,6 +64,16 @@ class svFSI(Simulation):
         self.p["f_sim"] = join(self.p["f_out"], "partitioned")
         self.p["f_conv"] = join(self.p["f_sim"], "converged")
         self.p["f_arx"] = join(self.p["f_out"], "archive")
+
+        # Override n_max for fluid if pulsatile mode is enabled
+        if self.p.get("pulsatile", False):
+            pulsatile_config = self.p.get("pulsatile_config", {})
+            n_cycles = pulsatile_config.get("n_cycles", 2)
+            steps_per_cycle = pulsatile_config.get("steps_per_cycle", 96)
+            self.p["n_max"]["fluid"] = n_cycles * steps_per_cycle
+            print(f"Pulsatile mode enabled: fluid solver will run {self.p['n_max']['fluid']} steps ({n_cycles} cycles × {steps_per_cycle} steps/cycle)")
+        else:
+            print(f"Steady flow mode: fluid solver will run {self.p['n_max']['fluid']} steps")
 
         # generate and move files and folders
         if load:
@@ -142,6 +153,15 @@ class svFSI(Simulation):
         for f in ["in_petsc", "in_svfsi"]:
             shutil.copytree(self.p["paths"][f], join(self.p["f_out"], f))
 
+        # Copy the appropriate flow data file based on mode
+        if self.p.get("pulsatile", False):
+            flow_file = self.p.get("pulsatile_config", {}).get("flow_data_file", "pulsatile_flow.dat")
+        else:
+            flow_file = "steady_flow.dat"
+        src = join(self.p["paths"]["in_svfsi"], flow_file)
+        if os.path.exists(src):
+            shutil.copy(src, self.p["f_out"])
+
         # generate and initialize mesh
         self.mesh_p = generate_mesh(join(self.p["paths"]["in_geo"], self.p["mesh"]))
         shutil.move("mesh_tube_fsi", join(self.p["f_out"], "mesh_tube_fsi"))
@@ -189,7 +209,9 @@ class svFSI(Simulation):
         p = self.p["fluid"]["p0"] * self.p_vec[t]
 
         # set bc pressure and flow
-        for bc, val in zip(["pressure", "flow"], [p, q]):
+        # in pulsatile mode, skip bc_flow — the waveform file must not be overwritten
+        bcs = ["pressure"] if self.p.get("pulsatile", False) else ["pressure", "flow"]
+        for bc, val in zip(bcs, [p, q]):
             fn = join(self.p["f_out"], self.p["interfaces"]["bc_" + bc])
             with open(fn, "w") as f:
                 f.write("2 1\n")
@@ -227,6 +249,21 @@ class svFSI(Simulation):
                     for di in d:
                         f.write(str(di * q * u) + " ")
                     f.write("\n")
+
+        # for pulsatile mode, update XML total step count before each run
+        # steps accumulate: iteration i ends at n_max["fluid"] * i
+        if self.p.get("pulsatile", False):
+            total_steps = self.p["n_max"]["fluid"] * i
+            xml_file = join(self.p["f_out"], "in_svfsi", self.p["inp"]["fluid"])
+            with open(xml_file, 'r') as f:
+                xml_content = f.read()
+            xml_content = re.sub(
+                r'<Number_of_time_steps>\s*\d+\s*</Number_of_time_steps>',
+                f'<Number_of_time_steps> {total_steps} </Number_of_time_steps>',
+                xml_content
+            )
+            with open(xml_file, 'w') as f:
+                f.write(xml_content)
 
         # get displacements
         # todo: move all to dedicated folder mesh_fluid_deformed
@@ -388,11 +425,74 @@ class svFSI(Simulation):
         # read and store results
         return self.post(name, i)
 
+    def extract_pulsatile_time_average(self, fname, i, fields):
+        """
+        Extract time-averaged quantities from pulsatile flow simulation.
+        Averages over the last cardiac cycle (last n_average_steps).
+
+        Args:
+            fname: Base filename for VTU files (e.g., "steady/steady_")
+            i: Current iteration counter
+            fields: List of field names to extract
+
+        Returns:
+            dict: {field_name: time-averaged_data}
+            list: geometries for archiving
+        """
+        pulsatile_config = self.p.get("pulsatile_config", {})
+        n_average_steps = pulsatile_config.get("n_average_steps", 96)
+
+        # Steps accumulate across coupling iterations, same as steady mode
+        # iteration i ends at step n_max["fluid"] * i
+        end_step = self.p["n_max"]["fluid"] * i
+        start_step = end_step - n_average_steps + 1
+
+        print(f"    Pulsatile mode: Averaging time steps {start_step} to {end_step} (last {n_average_steps} steps)")
+
+        # Read VTU files for the last cycle
+        # Files are numbered: steady_001.vtu, steady_002.vtu, ..., steady_192.vtu
+        # fname already includes the output directory and prefix (e.g., "steady/steady_")
+        src_files = []
+        for step in range(start_step, end_step + 1):
+            filepath = fname + str(step).zfill(3) + ".vtu"
+            fullpath = join(self.p["f_out"], filepath)
+            if os.path.exists(fullpath):
+                src_files.append(fullpath)
+            else:
+                print(f"    WARNING: File not found: {fullpath}")
+
+        if len(src_files) == 0:
+            raise ValueError(f"No VTU files found for time averaging from step {start_step} to {end_step}")
+
+        print(f"    Found {len(src_files)} VTU files for averaging")
+
+        # Read all geometries
+        geometries = [read_geo(f).GetOutput() for f in src_files]
+
+        # Extract and average fields
+        averaged_fields = {}
+        for field in fields:
+            field_data = []
+            for geo in geometries:
+                if geo.GetPointData().HasArray(sv_names[field]):
+                    field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
+
+            if len(field_data) > 0:
+                # Time average over the cardiac cycle
+                averaged_fields[field] = np.mean(np.array(field_data), axis=0)
+                print(f"    {field}: averaged over {len(field_data)} time steps")
+            else:
+                averaged_fields[field] = None
+                print(f"    WARNING: {field} not found in geometries")
+
+        return averaged_fields, geometries
+
     def post(self, domain, i):
         out = self.p["out"][domain]
         fname = join(out, out + "_")
         phys = domain
         i_str = str(i).zfill(3)
+
         if domain == "solid":
             # read current iteration
             fields = ["disp", "jac", "cauchy", "stress", "strain", "gr"]
@@ -401,12 +501,23 @@ class svFSI(Simulation):
             # read converged steady state flow
             fields = ["velo", "wss", "press"]
 
-            # read n_fluid last time steps
-            n_fluid = 1
-            src = [
-                fname + str(self.p["n_max"][domain] * i - j).zfill(3) + ".vtu"
-                for j in range(n_fluid)
-            ]
+            # Fluid solver always outputs files from 1 to n_max["fluid"]
+            # (these files are overwritten each coupling iteration)
+            # We want to read the LAST time step(s) from this run
+            total_fluid_steps = self.p["n_max"][domain]
+
+            if self.p.get("pulsatile", False):
+                # Pulsatile mode: 192 steps per coupling iteration (not accumulating)
+                # files are overwritten each iteration; averaging handled below
+                src = []
+            else:
+                # Steady flow: steps accumulate across coupling iterations
+                # iteration i ends at step n_max["fluid"] * i
+                n_fluid = 1
+                src = [
+                    fname + str(self.p["n_max"][domain] * i - j).zfill(3) + ".vtu"
+                    for j in range(n_fluid)
+                ]
         elif domain == "mesh":
             # read fully displaced mesh
             fields = ["disp"]
@@ -416,24 +527,45 @@ class svFSI(Simulation):
             raise ValueError("Unknown domain " + domain)
         src = [join(self.p["f_out"], s) for s in src]
 
-        # check if simulation crashed
-        if np.any([not os.path.exists(s) for s in src]):
+        # check if simulation crashed (skip for pulsatile mode - checked later)
+        if len(src) > 0 and np.any([not os.path.exists(s) for s in src]):
+            print(f"    ERROR: Missing VTU files for domain '{domain}':")
+            for s in src:
+                status = "EXISTS" if os.path.exists(s) else "MISSING"
+                print(f"      {status}: {s}")
             for f in fields:
                 self.curr.sol[f] = None
                 return True
-        else:
-            # archive results
+
+        # archive results (if we have src files to archive)
+        if len(src) > 0:
             trg = join(self.p["f_sim"], domain + "_out_" + i_str + ".vtu")
             shutil.copyfile(src[0], trg)
 
-            # read results
+        # read results
+        if domain == "fluid" and self.p.get("pulsatile", False):
+            # Pulsatile mode: extract and time-average over last cardiac cycle
+            averaged_data, res = self.extract_pulsatile_time_average(fname, i, fields)
+            # Archive the last time step (accumulated index)
+            src_archive = join(self.p["f_out"], fname + str(self.p["n_max"]["fluid"] * i).zfill(3) + ".vtu")
+            if os.path.exists(src_archive):
+                trg = join(self.p["f_sim"], domain + "_out_" + i_str + ".vtu")
+                shutil.copyfile(src_archive, trg)
+        else:
+            # Steady mode: read from single VTU file
             res = []
             for s in src:
                 res += [read_geo(s).GetOutput()]
+            averaged_data = None
 
-            # extract fields
-            for f in fields:
-                if f == "wss":
+        # extract fields
+        for f in fields:
+            if f == "wss":
+                if averaged_data is not None and f in averaged_data and averaged_data[f] is not None:
+                    # Pulsatile mode: use time-averaged WSS (already a vector array)
+                    sol = averaged_data[f]
+                else:
+                    # Steady mode: smooth WSS from VTK cell data to point data
                     sol = []
                     for r in res:
                         n_smooth = 1
@@ -450,27 +582,34 @@ class svFSI(Simulation):
                             c2p.Update()
                             c2p = c2p.GetOutput()
 
-                        # get element-wise wss maped to point data
+                        # get element-wise wss mapped to point data
                         sol += [v2n(c2p.GetPointData().GetArray("WSS"))]
                     sol = np.mean(np.array(sol), axis=0)
 
-                    # points on fluid interface
-                    map_int = self.map((("int", "fluid"), ("vol", "fluid")))
+                # points on fluid interface
+                map_int = self.map((("int", "fluid"), ("vol", "fluid")))
 
-                    # only store magnitude of wss at interface (doesn't make sense elsewhere)
-                    self.curr.add((phys, f, "int"), sol[map_int])
+                # only store magnitude of wss at interface (doesn't make sense elsewhere)
+                self.curr.add((phys, f, "int"), sol[map_int])
 
-                    # # only for logging, store svFSI point-wise wss
-                    # sol = v2n(res.GetPointData().GetArray(sv_names[f]))
-                    # self.curr.add((phys, 'pwss', 'int'), np.linalg.norm(sol[map_int], axis=1))
+                # # only for logging, store svFSI point-wise wss
+                # sol = v2n(res.GetPointData().GetArray(sv_names[f]))
+                # self.curr.add((phys, 'pwss', 'int'), np.linalg.norm(sol[map_int], axis=1))
+            else:
+                if averaged_data is not None and f in averaged_data and averaged_data[f] is not None:
+                    # Pulsatile mode: use time-averaged data
+                    sol = averaged_data[f]
                 else:
+                    # Steady mode: extract from VTU files
                     extr = []
                     for r in res:
                         if not r.GetPointData().HasArray(sv_names[f]):
                             raise ValueError("no array in PointData: " + sv_names[f])
                         extr += [v2n(r.GetPointData().GetArray(sv_names[f]))]
                     sol = np.mean(np.array(extr), axis=0)
-                    self.curr.add((phys, f, "vol"), sol)
+                    if domain == "fluid":
+                        print(f"      {f}: extracted from {len(extr)} geometries")
+                self.curr.add((phys, f, "vol"), sol)
 
         # archive input
         if domain in ["fluid", "solid"]:
