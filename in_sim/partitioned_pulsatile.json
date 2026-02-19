@@ -1,10 +1,11 @@
 {
     "fsi": true,
-    "debug": false,
+    "debug": true,
     "tortuosity": false,
+    "pulsatile": true,
     "mesh": "fsg_full_coarse.json",
     "n_procs": {
-        "fluid": 6,
+        "fluid": 4,
         "mesh": 1,
         "solid": 1
     },
@@ -19,6 +20,12 @@
         "fluid": 10,
         "mesh": 1,
         "solid": 1
+    },
+    "pulsatile_config": {
+        "n_cycles": 2,
+        "steps_per_cycle": 200,
+        "n_average_steps": 200,
+        "flow_data_file": "pulsatile_flow.dat"
     },
     "coup": {
         "nmax": 200,
@@ -38,12 +45,12 @@
         "solid": "/svfsi/svFSI-build/bin/svFSI"
     },
     "inp": {
-        "fluid": "steady_full.xml",
+        "fluid": "pulsatile_full.xml",
         "mesh": "mesh_full.xml",
         "solid": "gr_full_restart.xml"
     },
     "interfaces": {
-        "bc_flow": "steady_flow.dat",
+        "bc_flow": "pulsatile_flow.dat",
         "bc_pressure": "steady_pressure.dat",
         "disp": "interface_displacement.dat",
         "inflow_vector": "inflow_vector.dat",
@@ -54,7 +61,7 @@
         "load_wss": "interface_wss.vtp"
     },
     "out": {
-        "fluid": "steady",
+        "fluid": "pulsatile",
         "mesh": "mesh",
         "solid": "gr_restart"
     },

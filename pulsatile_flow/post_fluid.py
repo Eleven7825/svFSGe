@@ -74,6 +74,20 @@ def extract_results_fluid(res, wall_face_name="interface"):
         results["wss_mean"] = np.mean(wss_mag)
         results["wss_max"] = np.max(wss_mag)
 
+        # WSS at middle cross-section (filter by z position and non-zero WSS)
+        points = v2n(res.GetPoints().GetData())
+        z_coords = points[:, 2]
+        z_min, z_max = z_coords.min(), z_coords.max()
+        z_mid = (z_min + z_max) / 2
+        z_tol = (z_max - z_min) * 0.05  # 5% band around middle
+        mid_mask = np.abs(z_coords - z_mid) < z_tol
+        wss_mid = wss_mag[mid_mask]
+        wall_mask = wss_mid > 1e-10  # exclude interior nodes (zero WSS)
+        if np.any(wall_mask):
+            results["wss_mid_mean"] = np.mean(wss_mid[wall_mask])
+        else:
+            results["wss_mid_mean"] = np.mean(wss_mid)
+
     # Traction - alternative to WSS
     if point_data.HasArray("Traction"):
         traction = v2n(point_data.GetArray("Traction"))
@@ -205,6 +219,53 @@ def plot_time_series(results, output_dir):
     plt.close()
 
 
+def plot_wss_heartbeats(results, output_dir, steps_per_beat):
+    """
+    Overlay WSS at middle cross-section for each heart beat in one plot.
+
+    Args:
+        results: List of result dictionaries
+        output_dir: Directory to save the plot
+        steps_per_beat: Number of time steps per heart beat
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    if "wss_mid_mean" not in results[0]:
+        print("No mid-section WSS data available; skipping heartbeat overlay plot")
+        return
+
+    wss_mid = np.array([r["wss_mid_mean"] for r in results])
+    n_beats = len(wss_mid) // steps_per_beat
+
+    if n_beats == 0:
+        print("Not enough steps for one full beat; skipping heartbeat overlay plot")
+        return
+
+    colors = plt.cm.tab10.colors
+    beat_steps = np.arange(steps_per_beat)
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
+
+    for i in range(n_beats):
+        start = i * steps_per_beat
+        end = start + steps_per_beat
+        beat_wss = wss_mid[start:end]
+        ax.plot(beat_steps, beat_wss, color=colors[i % len(colors)],
+                linewidth=2, label=f"Beat {i + 1}")
+
+    ax.set_xlabel("Step within Beat")
+    ax.set_ylabel("Mean WSS at Middle [kg/(mm·s²)]")
+    ax.set_title("WSS at Middle Cross-section — Heart Beat Overlay")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fname = os.path.join(output_dir, "wss_heartbeats.pdf")
+    fig.savefig(fname, bbox_inches="tight")
+    print(f"Saved WSS heartbeat overlay plot to {fname}")
+    plt.close()
+
+
 def export_to_csv(results, output_file):
     """
     Export results to CSV file
@@ -262,6 +323,12 @@ def main():
         action="store_true",
         help="Export results to CSV"
     )
+    parser.add_argument(
+        "--steps-per-beat",
+        type=int,
+        default=None,
+        help="Number of time steps per heart beat for the beat overlay plot"
+    )
 
     args = parser.parse_args()
 
@@ -279,6 +346,8 @@ def main():
     # Create plots
     if not args.no_plot:
         plot_time_series(results, args.output)
+        if args.steps_per_beat is not None:
+            plot_wss_heartbeats(results, args.output, args.steps_per_beat)
 
     # Export to CSV
     if args.csv:

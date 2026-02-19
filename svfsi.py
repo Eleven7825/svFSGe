@@ -142,12 +142,6 @@ class svFSI(Simulation):
         for f in ["in_petsc", "in_svfsi"]:
             shutil.copytree(self.p["paths"][f], join(self.p["f_out"], f))
 
-        # copy static BC files to run directory
-        for f in ["pulsatile_flow.dat"]:
-            src = join(self.p["paths"]["in_svfsi"], f)
-            if os.path.exists(src):
-                shutil.copy(src, self.p["f_out"])
-
         # generate and initialize mesh
         self.mesh_p = generate_mesh(join(self.p["paths"]["in_geo"], self.p["mesh"]))
         shutil.move("mesh_tube_fsi", join(self.p["f_out"], "mesh_tube_fsi"))

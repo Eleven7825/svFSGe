@@ -4,7 +4,7 @@
 <GeneralSimulationParameters>
   <Continue_previous_simulation> 1 </Continue_previous_simulation>
   <Number_of_spatial_dimensions> 3 </Number_of_spatial_dimensions> 
-  <Number_of_time_steps> 960 </Number_of_time_steps>
+  <Number_of_time_steps> 10 </Number_of_time_steps>
   <Number_of_new_time_steps> 10 </Number_of_new_time_steps>
   <Time_step_size> 0.01 </Time_step_size> 
   <Spectral_radius_of_infinite_time_step> 0.5 </Spectral_radius_of_infinite_time_step> 
@@ -71,9 +71,9 @@
    <Add_BC name="f_start" > 
       <Type> Dir </Type> 
       <Profile> Parabolic </Profile> 
-      <!-- <Value> -1000.0 </Value> --> 
-      <Temporal_values_file_path> pulsatile_flow.dat </Temporal_values_file_path>
-      <Time_dependence> Unsteady </Time_dependence>
+      <Value> -1000.0 </Value> 
+      <!-- <Temporal_values_file_path> steady_flow.dat </Temporal_values_file_path>  -->
+      <!-- <Time_dependence> General </Time_dependence> -->
       <!-- <Temporal_and_spatial_values_file_path> inflow_vector.dat </Temporal_and_spatial_values_file_path>  -->
       <Zero_out_perimeter> false </Zero_out_perimeter> 
    </Add_BC> 

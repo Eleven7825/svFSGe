@@ -209,7 +209,10 @@ def post_process(f_out, start_step):
     # extract results and time-average over last cardiac cycle
     data_fluid, data_interface, data_interface_time = get_results(res, pts, ids_fluid, ids_interface, start_step)
 
-    return data_fluid, data_interface, data_interface_time, coords_fluid, coords_interface, len(res)
+    # extract WSS at mid ring for all time steps (needed for heartbeat overlay)
+    wss_mid_all = extract_wss_mid_timeseries(res, pts, ids_interface)
+
+    return data_fluid, data_interface, data_interface_time, coords_fluid, coords_interface, len(res), wss_mid_all
 
 
 def plot_single(data, coords, quant, out, locations, plot_combined=False):
@@ -324,6 +327,62 @@ def plot_single(data, coords, quant, out, locations, plot_combined=False):
     print(f"Saved: {fname}")
 
 
+def extract_wss_mid_timeseries(results, pts, ids_interface):
+    """Extract mean WSS at mid wall ring for every time step"""
+    loc = (":", "wall", "mid")
+    if loc not in ids_interface:
+        print("Warning: mid wall ring location not found")
+        return None
+
+    pt = ids_interface[loc]
+    wss_all = []
+    for res in results:
+        if res.GetPointData().HasArray("WSS"):
+            wss = v2n(res.GetPointData().GetArray("WSS"))
+            wss = np.linalg.norm(wss, axis=1)
+        elif res.GetPointData().HasArray("Traction"):
+            wss = v2n(res.GetPointData().GetArray("Traction"))
+            wss = np.linalg.norm(wss, axis=1)
+        else:
+            wss = np.zeros(pts.shape[0])
+        wss_all.append(np.mean(wss[pt]))
+
+    return np.array(wss_all)
+
+
+def plot_wss_heartbeat_overlay(wss_all, steps_per_beat, out):
+    """Overlay WSS at mid wall ring for each heart beat in one plot"""
+    wss_dyne = wss_all * f_scales["wss"][0]  # convert to dyne/cm²
+
+    n_beats = len(wss_dyne) // steps_per_beat
+    if n_beats == 0:
+        print("Not enough steps for one full beat; skipping heartbeat overlay plot")
+        return
+
+    colors = plt.cm.tab10.colors
+    beat_steps = np.arange(steps_per_beat)
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
+
+    for i in range(n_beats):
+        start = i * steps_per_beat
+        end = start + steps_per_beat
+        ax.plot(beat_steps, wss_dyne[start:end],
+                color=colors[i % len(colors)], linewidth=2, label=f"Beat {i + 1}")
+
+    ax.set_xlabel("Step within Beat")
+    ax.set_ylabel("WSS [dyne/cm²]")
+    ax.set_title("WSS at Middle Wall — Heart Beat Overlay")
+    ax.legend(loc="best", frameon=True)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fname = "wss_heartbeat_overlay_mid.pdf"
+    fig.savefig(os.path.join(out, fname), bbox_inches="tight")
+    plt.close()
+    print(f"Saved: {fname}")
+
+
 def plot_wss_time_series(data_interface_time, out, start_step):
     """Plot WSS averaged over circumferential rings as function of time"""
     # Locations: inlet, mid, outlet
@@ -411,16 +470,25 @@ def plot_res(data_fluid, data_interface, coords_fluid, coords_interface, out):
 
 def main():
     """Main function"""
-    # input and output directories
-    input_dir = "steady"
-    output_dir = "post_results"
+    import argparse
+    parser = argparse.ArgumentParser(description="Post-process pulsatile fluid simulation results")
+    parser.add_argument("input_dir", nargs="?", default="steady",
+                        help="Directory containing VTU files (default: steady)")
+    parser.add_argument("--start-step", type=int, default=96,
+                        help="First step index (0-based) for time averaging (default: 96)")
+    parser.add_argument("--steps-per-beat", type=int, default=None,
+                        help="Steps per heart beat for beat overlay plot")
+    parser.add_argument("--output-dir", default="post_results_pulsatile",
+                        help="Output directory for plots (default: post_results_pulsatile)")
+    args = parser.parse_args()
+
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+    start_step = args.start_step
     os.makedirs(output_dir, exist_ok=True)
 
-    # start step for last cardiac cycle (step 97 = index 96, since we're 0-indexed)
-    start_step = 96  # step 97 in 1-indexed
-
     # post-process
-    data_fluid, data_interface, data_interface_time, coords_fluid, coords_interface, n_times = post_process(input_dir, start_step)
+    data_fluid, data_interface, data_interface_time, coords_fluid, coords_interface, n_times, wss_mid_all = post_process(input_dir, start_step)
 
     print(f"Time-averaged over steps {start_step+1} to {n_times} ({n_times - start_step} steps)")
     print(f"Fluid locations: {list(data_fluid.keys())}")
@@ -431,6 +499,10 @@ def main():
 
     # plot WSS time series on circumferential rings
     plot_wss_time_series(data_interface_time, output_dir, start_step)
+
+    # plot WSS heartbeat overlay at mid wall
+    if args.steps_per_beat is not None and wss_mid_all is not None:
+        plot_wss_heartbeat_overlay(wss_mid_all, args.steps_per_beat, output_dir)
 
     print(f"\nResults saved to: {output_dir}")
 
