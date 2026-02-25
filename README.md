@@ -86,7 +86,35 @@ This script will:
 The container persists after you exit. Run the script again to reconnect, or use:
 ```bash
 docker exec -it fsg-dev /bin/bash
-``` 
+```
+
+## HPC / Singularity Installation
+
+For HPC environments where Docker is not available, use Singularity/Apptainer:
+
+```bash
+git clone https://github.com/Eleven7825/svFSGe.git ~/svFSGe
+cd ~/svFSGe
+./scripts/setup_singularity.sh
+```
+
+**Run test simulation:**
+```bash
+./scripts/run_simulation.sh in_sim/partitioned_test.json
+```
+
+**Or manually with Singularity:**
+```bash
+singularity exec \
+  --bind ~/svfsi:/svfsi \
+  --bind ~/svFSGe:/svFSGe \
+  ~/svFSGe/singularity_images/simvascular-solver.sif \
+  python3 /svFSGe/fsg.py /svFSGe/in_sim/partitioned_test.json
+```
+
+**Note**: Adjust the number of cores in your configuration files to match your HPC allocation.
+
+**Prerequisites**: Singularity/Apptainer and git. See [README_SINGULARITY.md](README_SINGULARITY.md) for complete documentation.
 
 ## Continuous Integration
 
