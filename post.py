@@ -81,7 +81,7 @@ def read_xml_file(file_path):
 
 
 def read_json_file(file_path):
-    if not file_path:
+    if not file_path or not os.path.exists(file_path):
         return {}
     with open(file_path, "r") as file:
         return json.load(file)
@@ -337,7 +337,7 @@ def post_process(f_out, domain="solid"):
     return get_results(res, pts, ids, domain), coords, len(res)
 
 
-def plot_res(data, coords, times, param, out, domain, study):
+def plot_res(data, coords, times, param, out, domain, study, load_step=None):
     if domain == "solid":
         # cir locations: times on the clock
         loc_cir = range(0, 12, 3)
@@ -358,8 +358,10 @@ def plot_res(data, coords, times, param, out, domain, study):
 
     # loop time steps
     t_max = min(times.values())
+    if load_step is None:
+        load_step = [-1]
     # for t in reversed(range(t_max)):
-    for t in [-1]:
+    for t in load_step:
         # loop fields and plot
         for f in sorted(fields[domain]):
             # plot single points
@@ -413,7 +415,7 @@ def plot_single(data, coords, param, out, study, quant, locations, time=-1):
         ax = [ax]
     for i_data, (n, res) in enumerate(data.items()):
         for j_data in range(f_comp[quant]):
-            title = titles[n.split("_")[0]]
+            title = next((v for k, v in titles.items() if k in n), n)
             if study == "single":
                 title += r", $K_{\tau\sigma,o} = " + param[n]["KsKi"] + "$"
 
@@ -578,7 +580,7 @@ def plot_single(data, coords, param, out, study, quant, locations, time=-1):
     print(fname)
 
 
-def main_param(folder, p_name, domain="solid"):
+def main_param(folder, p_name, domain="solid", load_step=-1):
     # collect simulations
     out, inp, param = collect_simulations(folder)
 
@@ -608,7 +610,7 @@ def main_param(folder, p_name, domain="solid"):
                 data_sorted[i_s][loc][f] += [data[n][loc][f][-1]]
         param_sorted[i_s] = {p_name: np.array(study_params, dtype=float)}
 
-    plot_res(data_sorted, coords, times, param_sorted, out, domain, "KsKi")
+    plot_res(data_sorted, coords, times, param_sorted, out, domain, "KsKi", load_step=[load_step])
 
 
 def collect_simulations(folder):
@@ -629,7 +631,7 @@ def collect_simulations(folder):
             dir_name = f
             f_p_json = ""
             f_p_xml = os.path.join(f, "gr_full.xml")
-        elif "partitioned" in f:
+        elif "partitioned" in f or os.path.isdir(os.path.join(f, "partitioned")):
             dir_name = os.path.join(f, "partitioned", "converged")
             f_p_json = os.path.join(f, "partitioned.json")
             f_p_xml = os.path.join(f, "in_svfsi", "gr_full_restart.xml")
@@ -650,7 +652,7 @@ def collect_simulations(folder):
     return out, inp, param
 
 
-def main_arg(folder, domain="solid"):
+def main_arg(folder, domain="solid", load_step=-1):
     # collect simulations
     out, inp, param = collect_simulations(folder)
 
@@ -661,7 +663,7 @@ def main_arg(folder, domain="solid"):
     for n, o in inp.items():
         data[n], coords[n], times[n] = post_process(o, domain)
 
-    plot_res(data, coords, times, param, out, domain, "single")
+    plot_res(data, coords, times, param, out, domain, "single", load_step=[load_step])
 
 
 def main_convergence(folder):
@@ -713,12 +715,13 @@ if __name__ == "__main__":
     parser.add_argument("-c", action="store_true", help="Plot convergence")
     parser.add_argument("-p", type=str, help="Plot parametric study")
     parser.add_argument("-f", action="store_true", help="Plot fluid (instead of solid)")
+    parser.add_argument("-t", type=int, default=-1, help="Plot specific load step (default: last)")
     args = parser.parse_args()
 
     domain = "fluid" if args.f else "solid"
     if args.c:
         main_convergence(args.out)
     elif args.p:
-        main_param(args.out, args.p, domain)
+        main_param(args.out, args.p, domain, load_step=args.t)
     else:
-        main_arg(args.out, domain)
+        main_arg(args.out, domain, load_step=args.t)
