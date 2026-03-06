@@ -428,7 +428,7 @@ class svFSI(Simulation):
     def extract_pulsatile_time_average(self, fname, i, fields):
         """
         Extract time-averaged quantities from pulsatile flow simulation.
-        Averages over the last cardiac cycle (last n_average_steps).
+        Averages over the last cardiac cycle (last n_reduction_steps).
 
         Args:
             fname: Base filename for VTU files (e.g., "steady/steady_")
@@ -440,14 +440,14 @@ class svFSI(Simulation):
             list: geometries for archiving
         """
         pulsatile_config = self.p.get("pulsatile_config", {})
-        n_average_steps = pulsatile_config.get("n_average_steps", 96)
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps", 96)
 
         # Steps accumulate across coupling iterations, same as steady mode
         # iteration i ends at step n_max["fluid"] * i
         end_step = self.p["n_max"]["fluid"] * i
-        start_step = end_step - n_average_steps + 1
+        start_step = end_step - n_reduction_steps + 1
 
-        print(f"    Pulsatile mode: Averaging time steps {start_step} to {end_step} (last {n_average_steps} steps)")
+        print(f"    Pulsatile mode: Averaging time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
 
         # Read VTU files for the last cycle
         # Files are numbered: steady_001.vtu, steady_002.vtu, ..., steady_192.vtu
@@ -486,6 +486,102 @@ class svFSI(Simulation):
                 print(f"    WARNING: {field} not found in geometries")
 
         return averaged_fields, geometries
+
+    def extract_pulsatile_amplitude(self, fname, i, fields):
+        """
+        Extract amplitude (max - min) of quantities over the last cardiac cycle.
+
+        For each field, computes the pointwise difference between the maximum
+        and minimum values across the last n_reduction_steps time steps.
+
+        Args:
+            fname: Base filename for VTU files (e.g., "steady/steady_")
+            i: Current iteration counter
+            fields: List of field names to extract (only these fields are processed)
+
+        Returns:
+            dict: {field_name: amplitude_data (max - min)}
+            list: geometries for archiving
+        """
+        pulsatile_config = self.p.get("pulsatile_config", {})
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps", 96)
+
+        end_step = self.p["n_max"]["fluid"] * i
+        start_step = end_step - n_reduction_steps + 1
+
+        print(f"    Pulsatile mode: Computing amplitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
+
+        src_files = []
+        for step in range(start_step, end_step + 1):
+            filepath = fname + str(step).zfill(3) + ".vtu"
+            fullpath = join(self.p["f_out"], filepath)
+            if os.path.exists(fullpath):
+                src_files.append(fullpath)
+            else:
+                print(f"    WARNING: File not found: {fullpath}")
+
+        if len(src_files) == 0:
+            raise ValueError(f"No VTU files found for amplitude computation from step {start_step} to {end_step}")
+
+        print(f"    Found {len(src_files)} VTU files for amplitude computation")
+
+        geometries = [read_geo(f).GetOutput() for f in src_files]
+
+        amplitude_fields = {}
+        for field in fields:
+            field_data = []
+            for geo in geometries:
+                if geo.GetPointData().HasArray(sv_names[field]):
+                    field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
+
+            if len(field_data) > 0:
+                stacked = np.array(field_data)
+                amplitude_fields[field] = np.max(stacked, axis=0) - np.min(stacked, axis=0)
+                print(f"    {field}: amplitude (max-min) computed over {len(field_data)} time steps")
+            else:
+                amplitude_fields[field] = None
+                print(f"    WARNING: {field} not found in geometries")
+
+        return amplitude_fields, geometries
+
+    def extract_pulsatile_data(self, fname, i, fields):
+        """
+        Dispatch per-field extraction to either time_average or amplitude based on
+        the pulsatile_config.field_reduction mapping in the JSON.
+
+        Default reductions (overridable in JSON under pulsatile_config.field_reduction):
+            wss  -> "amplitude"
+            velo -> "time_average"
+            press -> "time_average"
+
+        Args:
+            fname: Base filename for VTU files
+            i: Current iteration counter
+            fields: List of field names to extract
+
+        Returns:
+            dict: {field_name: extracted_data}
+            list: geometries (from the last extraction call, for archiving)
+        """
+        pulsatile_config = self.p.get("pulsatile_config", {})
+        defaults = {"wss": "amplitude", "velo": "time_average", "press": "time_average"}
+        field_reduction = {**defaults, **pulsatile_config.get("field_reduction", {})}
+
+        avg_fields = [f for f in fields if field_reduction.get(f, "time_average") == "time_average"]
+        amp_fields = [f for f in fields if field_reduction.get(f, "time_average") == "amplitude"]
+
+        combined = {}
+        geometries = []
+
+        if avg_fields:
+            avg_data, geometries = self.extract_pulsatile_time_average(fname, i, avg_fields)
+            combined.update(avg_data)
+
+        if amp_fields:
+            amp_data, geometries = self.extract_pulsatile_amplitude(fname, i, amp_fields)
+            combined.update(amp_data)
+
+        return combined, geometries
 
     def post(self, domain, i):
         out = self.p["out"][domain]
@@ -544,8 +640,8 @@ class svFSI(Simulation):
 
         # read results
         if domain == "fluid" and self.p.get("pulsatile", False):
-            # Pulsatile mode: extract and time-average over last cardiac cycle
-            averaged_data, res = self.extract_pulsatile_time_average(fname, i, fields)
+            # Pulsatile mode: extract per-field reduction (time_average or amplitude)
+            averaged_data, res = self.extract_pulsatile_data(fname, i, fields)
             # Archive the last time step (accumulated index)
             src_archive = join(self.p["f_out"], fname + str(self.p["n_max"]["fluid"] * i).zfill(3) + ".vtu")
             if os.path.exists(src_archive):
