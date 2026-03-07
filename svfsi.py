@@ -75,6 +75,9 @@ class svFSI(Simulation):
         else:
             print(f"Steady flow mode: fluid solver will run {self.p['n_max']['fluid']} steps")
 
+        # store input file path for archiving
+        self._f_params = f_params
+
         # generate and move files and folders
         if load:
             fm = os.path.join(
@@ -165,6 +168,15 @@ class svFSI(Simulation):
         # generate and initialize mesh
         self.mesh_p = generate_mesh(join(self.p["paths"]["in_geo"], self.p["mesh"]))
         shutil.move("mesh_tube_fsi", join(self.p["f_out"], "mesh_tube_fsi"))
+
+        # copy input JSON to archive
+        if self._f_params and os.path.isfile(self._f_params):
+            shutil.copy(self._f_params, self.p["f_arx"])
+
+        # copy in_geo folder alongside archive
+        in_geo_src = self.p["paths"]["in_geo"]
+        if os.path.isdir(in_geo_src):
+            shutil.copytree(in_geo_src, join(self.p["f_out"], "in_geo"))
 
     def set_defaults(self):
         pass
