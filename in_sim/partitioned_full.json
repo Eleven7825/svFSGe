@@ -1,6 +1,6 @@
 {
     "fsi": true,
-    "debug": false,
+    "debug": true,
     "tortuosity": false,
     "mesh": "fsg_full_coarse.json",
     "n_procs": {
