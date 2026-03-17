@@ -88,8 +88,8 @@ echo ""
 
 # Create necessary directories
 print_step "Creating directories..."
-mkdir -p "$PROJECT_DIR/svMultiPhysics"
-echo "✓ Created svMultiPhysics directory"
+mkdir -p "$PROJECT_DIR/../svfsi"
+echo "✓ Created svfsi directory"
 
 # Check if Docker image exists locally
 print_step "Checking Docker image..."
@@ -122,7 +122,8 @@ if docker ps -a -q -f name="^${CONTAINER_NAME}$" | grep -q .; then
     echo ""
 
     # Exec into existing container
-    docker exec -it $CONTAINER_NAME /bin/bash
+    TTY_FLAG=$([ -t 0 ] && echo "-it" || echo "-i")
+    docker exec $TTY_FLAG $CONTAINER_NAME /bin/bash
 
     echo ""
     print_step "Done!"
@@ -139,7 +140,7 @@ if [ "$INTERACTIVE" = true ]; then
 
     # Start container in detached mode with infinite sleep
     docker run -d --name $CONTAINER_NAME \
-        -v "$PROJECT_DIR/../svMultiPhysics:/svfsi" \
+        -v "$PROJECT_DIR/../svfsi:/svfsi" \
         -v "$PROJECT_DIR:/svFSGe" \
         simvascular/solver:latest \
         sleep infinity
@@ -219,14 +220,15 @@ if [ "$INTERACTIVE" = true ]; then
     echo "Tip: The container persists. Rerun this script to reconnect."
     echo ""
 
-    docker exec -it $CONTAINER_NAME /bin/bash
+    TTY_FLAG=$([ -t 0 ] && echo "-it" || echo "-i")
+    docker exec $TTY_FLAG $CONTAINER_NAME /bin/bash
 
 else
     # Non-interactive mode (for scripting)
     echo "Starting container in background..."
 
     docker run -d --name $CONTAINER_NAME \
-        -v "$PROJECT_DIR/../svMultiPhysics:/svfsi" \
+        -v "$PROJECT_DIR/../svfsi:/svfsi" \
         -v "$PROJECT_DIR:/svFSGe" \
         simvascular/solver:latest \
         sleep infinity
