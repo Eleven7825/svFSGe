@@ -69,7 +69,7 @@ class svFSI(Simulation):
         if self.p.get("pulsatile", False):
             pulsatile_config = self.p.get("pulsatile_config", {})
             n_cycles = pulsatile_config.get("n_cycles", 2)
-            steps_per_cycle = pulsatile_config.get("steps_per_cycle", 96)
+            steps_per_cycle = pulsatile_config.get("steps_per_cycle")
             self.p["n_max"]["fluid"] = n_cycles * steps_per_cycle
             print(f"Pulsatile mode enabled: fluid solver will run {self.p['n_max']['fluid']} steps ({n_cycles} cycles × {steps_per_cycle} steps/cycle)")
         else:
@@ -516,7 +516,7 @@ class svFSI(Simulation):
             list: geometries for archiving
         """
         pulsatile_config = self.p.get("pulsatile_config", {})
-        n_reduction_steps = pulsatile_config.get("n_reduction_steps", 96)
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps")
 
         end_step = self.p["n_max"]["fluid"] * i
         start_step = end_step - n_reduction_steps + 1
