@@ -3,9 +3,9 @@
     "debug": true,
     "tortuosity": false,
     "pulsatile": true,
-    "mesh": "fsg_full_medium.json",
+    "mesh": "fsg_full_coarse.prestress.json",
     "n_procs": {
-        "fluid": 16,
+        "fluid": 4,
         "mesh": 1,
         "solid": 1
     },
