@@ -48,7 +48,7 @@
    <Coupled> true </Coupled>
    <Min_iterations> 1</Min_iterations>  
    <Max_iterations> 10 </Max_iterations> 
-   <Tolerance> 1e-6 </Tolerance> 
+   <Tolerance> 1e-7 </Tolerance> 
 
    <Density> 0.0 </Density> 
    <Elasticity_modulus> 1.0 </Elasticity_modulus> 

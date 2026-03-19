@@ -452,7 +452,7 @@ class svFSI(Simulation):
             list: geometries for archiving
         """
         pulsatile_config = self.p.get("pulsatile_config", {})
-        n_reduction_steps = pulsatile_config.get("n_reduction_steps", 96)
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps")
 
         # Steps accumulate across coupling iterations, same as steady mode
         # iteration i ends at step n_max["fluid"] * i
@@ -516,7 +516,7 @@ class svFSI(Simulation):
             list: geometries for archiving
         """
         pulsatile_config = self.p.get("pulsatile_config", {})
-        n_reduction_steps = pulsatile_config.get("n_reduction_steps", 96)
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps")
 
         end_step = self.p["n_max"]["fluid"] * i
         start_step = end_step - n_reduction_steps + 1
