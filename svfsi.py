@@ -437,7 +437,7 @@ class svFSI(Simulation):
         # read and store results
         return self.post(name, i)
 
-    def extract_pulsatile_time_average(self, fname, i, fields):
+    def extract_pulsatile_time_average(self, fname, i, fields, verbose=False):
         """
         Extract time-averaged quantities from pulsatile flow simulation.
         Averages over the last cardiac cycle (last n_reduction_steps).
@@ -459,7 +459,8 @@ class svFSI(Simulation):
         end_step = self.p["n_max"]["fluid"] * i
         start_step = end_step - n_reduction_steps + 1
 
-        print(f"    Pulsatile mode: Averaging time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
+        if verbose:
+            print(f"    Pulsatile mode: Averaging time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
 
         # Read VTU files for the last cycle
         # Files are numbered: steady_001.vtu, steady_002.vtu, ..., steady_192.vtu
@@ -476,7 +477,8 @@ class svFSI(Simulation):
         if len(src_files) == 0:
             raise ValueError(f"No VTU files found for time averaging from step {start_step} to {end_step}")
 
-        print(f"    Found {len(src_files)} VTU files for averaging")
+        if verbose:
+            print(f"    Found {len(src_files)} VTU files for averaging")
 
         # Read all geometries
         geometries = [read_geo(f).GetOutput() for f in src_files]
@@ -492,14 +494,15 @@ class svFSI(Simulation):
             if len(field_data) > 0:
                 # Time average over the cardiac cycle
                 averaged_fields[field] = np.mean(np.array(field_data), axis=0)
-                print(f"    {field}: averaged over {len(field_data)} time steps")
+                if verbose:
+                    print(f"    {field}: averaged over {len(field_data)} time steps")
             else:
                 averaged_fields[field] = None
                 print(f"    WARNING: {field} not found in geometries")
 
         return averaged_fields, geometries
 
-    def extract_pulsatile_amplitude(self, fname, i, fields):
+    def extract_pulsatile_amplitude(self, fname, i, fields, verbose=False):
         """
         Extract amplitude (max - min) of quantities over the last cardiac cycle.
 
@@ -521,7 +524,8 @@ class svFSI(Simulation):
         end_step = self.p["n_max"]["fluid"] * i
         start_step = end_step - n_reduction_steps + 1
 
-        print(f"    Pulsatile mode: Computing amplitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
+        if verbose:
+            print(f"    Pulsatile mode: Computing amplitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
 
         src_files = []
         for step in range(start_step, end_step + 1):
@@ -535,7 +539,8 @@ class svFSI(Simulation):
         if len(src_files) == 0:
             raise ValueError(f"No VTU files found for amplitude computation from step {start_step} to {end_step}")
 
-        print(f"    Found {len(src_files)} VTU files for amplitude computation")
+        if verbose:
+            print(f"    Found {len(src_files)} VTU files for amplitude computation")
 
         geometries = [read_geo(f).GetOutput() for f in src_files]
 
@@ -549,14 +554,15 @@ class svFSI(Simulation):
             if len(field_data) > 0:
                 stacked = np.array(field_data)
                 amplitude_fields[field] = np.max(stacked, axis=0) - np.min(stacked, axis=0)
-                print(f"    {field}: amplitude (max-min) computed over {len(field_data)} time steps")
+                if verbose:
+                    print(f"    {field}: amplitude (max-min) computed over {len(field_data)} time steps")
             else:
                 amplitude_fields[field] = None
                 print(f"    WARNING: {field} not found in geometries")
 
         return amplitude_fields, geometries
 
-    def extract_pulsatile_data(self, fname, i, fields):
+    def extract_pulsatile_data(self, fname, i, fields, verbose=False):
         """
         Dispatch per-field extraction to either time_average or amplitude based on
         the pulsatile_config.field_reduction mapping in the JSON.
@@ -586,11 +592,11 @@ class svFSI(Simulation):
         geometries = []
 
         if avg_fields:
-            avg_data, geometries = self.extract_pulsatile_time_average(fname, i, avg_fields)
+            avg_data, geometries = self.extract_pulsatile_time_average(fname, i, avg_fields, verbose=verbose)
             combined.update(avg_data)
 
         if amp_fields:
-            amp_data, geometries = self.extract_pulsatile_amplitude(fname, i, amp_fields)
+            amp_data, geometries = self.extract_pulsatile_amplitude(fname, i, amp_fields, verbose=verbose)
             combined.update(amp_data)
 
         return combined, geometries
@@ -653,7 +659,7 @@ class svFSI(Simulation):
         # read results
         if domain == "fluid" and self.p.get("pulsatile", False):
             # Pulsatile mode: extract per-field reduction (time_average or amplitude)
-            averaged_data, res = self.extract_pulsatile_data(fname, i, fields)
+            averaged_data, res = self.extract_pulsatile_data(fname, i, fields, verbose=self.p.get("debug", False))
             # Archive the last time step (accumulated index)
             src_archive = join(self.p["f_out"], fname + str(self.p["n_max"]["fluid"] * i).zfill(3) + ".vtu")
             if os.path.exists(src_archive):
