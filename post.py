@@ -652,6 +652,78 @@ def collect_simulations(folder):
     return out, inp, param
 
 
+def plot_cc(f_out, out):
+    # load debug QR data
+    f_npy = os.path.join(f_out, "debug_qr.npy")
+    if not os.path.exists(f_npy):
+        return
+    d = np.load(f_npy, allow_pickle=True).item()
+    cc_list = d["cc"]
+    ncols_before = d["ncols_before"]
+    ncols_after = d["ncols_after"]
+    n_iter = len(cc_list)
+
+    # load error to find load-step transition boundaries
+    # IQN-ILS fires at sub-iter n>0, starting from t=1
+    f_json = os.path.join(f_out, "partitioned.json")
+    transitions = []  # call indices after which a new load step begins
+    if os.path.exists(f_json):
+        with open(f_json) as fh:
+            p = json.load(fh)
+        err = p.get("error", {})
+        if err:
+            first_key = next(iter(err))
+            # IQN-ILS calls per load step = max(0, n_subiters - 1), skipping t=0
+            cumulative = 0
+            for t, subiters in enumerate(err[first_key]):
+                if t == 0:
+                    continue
+                n_calls = max(0, len(subiters) - 1)
+                cumulative += n_calls
+                transitions.append(cumulative)
+
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), dpi=150)
+
+    # top: norm of cc per IQN-ILS call
+    norms = [np.linalg.norm(cc) for cc in cc_list]
+    ax = axes[0]
+    ax.plot(range(n_iter), norms, "ko-", markersize=4, linewidth=1)
+    for i, xv in enumerate(transitions[:-1]):
+        ax.axvline(xv - 0.5, color="r", linestyle="--", linewidth=1,
+                   label=f"t={i+1}$\\to${i+2}" if i == 0 else f"t={i+1}$\\to${i+2}")
+    ax.set_ylabel(r"$\|c\|$")
+    ax.set_xlabel("IQN-ILS call index")
+    ax.set_title(r"Norm of IQN-ILS coefficients $c$")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.4)
+    if transitions[:-1]:
+        ax.legend(fontsize=8)
+
+    # bottom: heatmap of cc values
+    max_len = max(len(cc) for cc in cc_list)
+    mat = np.full((n_iter, max_len), np.nan)
+    for i, cc in enumerate(cc_list):
+        mat[i, :len(cc)] = cc
+    ax = axes[1]
+    vmax = np.nanpercentile(np.abs(mat), 95)
+    im = ax.imshow(mat.T, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, origin="lower")
+    for i, xv in enumerate(transitions[:-1]):
+        ax.axvline(xv - 0.5, color="k", linestyle="--", linewidth=1,
+                   label=f"t={i+1}$\\to${i+2}")
+    ax.set_xlabel("IQN-ILS call index")
+    ax.set_ylabel("Coefficient index")
+    ax.set_title(r"IQN-ILS coefficients $c$ (color capped at 95th percentile)")
+    if transitions[:-1]:
+        ax.legend(fontsize=8)
+    plt.colorbar(im, ax=ax)
+
+    plt.tight_layout()
+    fname = os.path.join(out, "cc_coefficients.pdf")
+    fig.savefig(fname, bbox_inches="tight")
+    plt.close(fig)
+    print("cc_coefficients.pdf")
+
+
 def main_arg(folder, domain="solid", load_step=-1):
     # collect simulations
     out, inp, param = collect_simulations(folder)
@@ -664,6 +736,11 @@ def main_arg(folder, domain="solid", load_step=-1):
         data[n], coords[n], times[n] = post_process(o, domain)
 
     plot_res(data, coords, times, param, out, domain, "single", load_step=[load_step])
+
+    # plot IQN-ILS cc coefficients if debug data exists
+    for n, f_out in inp.items():
+        f_run = os.path.dirname(f_out.rstrip("/"))  # go up from partitioned/converged
+        plot_cc(f_run, out)
 
 
 def main_convergence(folder):

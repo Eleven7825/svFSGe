@@ -130,6 +130,11 @@ class svFSI(Simulation):
         self.mat_W = []
         self.dk = defaultdict(list)
         self.dtk = defaultdict(list)
+        self.debug_qr = {
+            "V_before": [], "W_before": [], "ncols_before": [],
+            "Q": [], "R": [], "V_after": [], "W_after": [], "ncols_after": [],
+            "cc": [],
+        }
 
         # current/previous solution vector at interface and in volume
         self.curr = Solution(self)

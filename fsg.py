@@ -211,6 +211,10 @@ class FSG(svFSI):
         plt.close(fig)
 
     def archive(self):
+        # save debug QR data if enabled
+        if self.p["coup"].get("iqn_ils_debug", False):
+            np.save(os.path.join(self.p["f_out"], "debug_qr.npy"), self.debug_qr)
+
         # save stored results
         self.p["error"] = self.err
 
@@ -294,11 +298,30 @@ class FSG(svFSI):
                 tmp_V = np.array(self.mat_V).T
                 tmp_W = np.array(self.mat_W).T
                 eps = self.p["coup"]["iqn_ils_eps"]
+
+                # debug: save V and W before filtering
+                if self.p["coup"].get("iqn_ils_debug", False):
+                    self.debug_qr["V_before"] += [tmp_V.copy()]
+                    self.debug_qr["W_before"] += [tmp_W.copy()]
+                    self.debug_qr["ncols_before"] += [tmp_V.shape[1]]
+
                 qq, rr, tmp_V, tmp_W = QRfiltering_mod(tmp_V, tmp_W, eps)
+
+                # debug: save Q, R and V, W after filtering
+                if self.p["coup"].get("iqn_ils_debug", False):
+                    self.debug_qr["Q"] += [qq.copy()]
+                    self.debug_qr["R"] += [rr.copy()]
+                    self.debug_qr["V_after"] += [tmp_V.copy()]
+                    self.debug_qr["W_after"] += [tmp_W.copy()]
+                    self.debug_qr["ncols_after"] += [tmp_V.shape[1]]
 
                 # solve for coefficients
                 ss = np.dot(np.transpose(qq), -self.res[-1])
                 cc = np.linalg.solve(rr, ss)
+
+                # debug: save coefficients
+                if self.p["coup"].get("iqn_ils_debug", False):
+                    self.debug_qr["cc"] += [cc.copy()]
 
                 # update
                 vec_new = dtk + np.dot(tmp_W, cc)
