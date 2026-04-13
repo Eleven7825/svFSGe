@@ -701,14 +701,13 @@ def plot_cc(f_out, out):
                 residuals_before = np.array(res_b)
                 residuals_after = np.array(res_a)
 
-    # build absolute-value log-scale heatmap matrix, y from 1..q_max
+    # build heatmap matrix, y from 1..q_max
     mat = np.full((n_iter, q_max), np.nan)
     for i, cc in enumerate(cc_list):
-        mat[i, :len(cc)] = np.abs(cc)
+        mat[i, :len(cc)] = cc
 
     n_plots = 3 if residuals_before is not None else 2
     from matplotlib.gridspec import GridSpec
-    from matplotlib.colors import LogNorm
     # two columns: wide data column + narrow colorbar column (same for all rows)
     cbar_width = 0.03
     fig = plt.figure(figsize=(12, 3.5 * n_plots), dpi=150)
@@ -738,13 +737,13 @@ def plot_cc(f_out, out):
 
     # --- subplot 0: heatmap |cc|, log scale, integer y-ticks 1..q_max ---
     ax = axes[0]
-    mat_plot = np.where(np.isnan(mat), np.nan, np.where(mat == 0, 1e-16, mat))
-    vmin = np.nanmin(mat_plot[mat_plot > 0])
-    vmax = np.nanmax(mat_plot)
+    valid = mat[~np.isnan(mat)]
+    vmax = np.percentile(np.abs(valid), 95)
+    vmin = -vmax
     im = ax.pcolormesh(np.arange(n_iter + 1) - 0.5,
                        np.arange(q_max + 1) - 0.5,
-                       mat_plot.T,
-                       cmap="Reds", norm=LogNorm(vmin=vmin, vmax=vmax),
+                       mat.T,
+                       cmap="RdBu_r", vmin=vmin, vmax=vmax,
                        shading="flat")
     ax.step(x, np.array(ncols_after) - 0.5, where="mid", color="k", linewidth=1.5)
     add_vlines(ax)
@@ -755,7 +754,7 @@ def plot_cc(f_out, out):
     ax.set_yticklabels(yticks + 1)
     ax.set_ylim(-0.5, q_max - 0.5)
     ax.set_xlim(xlim)
-    ax.set_title(r"$|c|$ (log scale)")
+    ax.set_title(r"$c$ (95th percentile color scale)")
     # colorbar: use the row-0 placeholder (make it visible again)
     cax = fig.axes[n_plots]  # first dummy axes = row 0 col 1
     cax.set_visible(True)
