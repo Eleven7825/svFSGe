@@ -716,19 +716,25 @@ def plot_cc(f_out, out):
                   width_ratios=[1 - cbar_width, cbar_width],
                   hspace=0.35, wspace=0.02)
     axes = [fig.add_subplot(gs[i, 0]) for i in range(n_plots)]
+    # add invisible placeholder subplots in colorbar column for all rows
+    # so all data axes in column 0 have identical width
+    for i in range(n_plots):
+        ax_dummy = fig.add_subplot(gs[i, 1])
+        ax_dummy.set_visible(False)
     # share x across all data axes
     for ax in axes[1:]:
-        axes[0].get_shared_x_axes().join(axes[0], ax)
+        ax.sharex(axes[0])
 
     x = np.arange(n_iter)
     xlim = (-0.5, n_iter - 0.5)
 
-    def add_vlines(ax, color="k"):
+    def add_vlines(ax, color="k", with_label=False):
         for xv in transitions:
             t_from = t_arr[xv - 1]
             t_to = t_arr[xv]
+            lbl = f"t={t_from}$\\to${t_to}" if with_label else None
             ax.axvline(xv - 0.5, color=color, linestyle="--", linewidth=1,
-                       label=f"t={t_from}$\\to${t_to}")
+                       label=lbl)
 
     # --- subplot 0: heatmap |cc|, log scale, integer y-ticks 1..q_max ---
     ax = axes[0]
@@ -743,22 +749,23 @@ def plot_cc(f_out, out):
     ax.step(x, np.array(ncols_after) - 0.5, where="mid", color="k", linewidth=1.5)
     add_vlines(ax)
     ax.set_ylabel("Coefficient index")
-    ax.set_yticks(np.arange(q_max))
-    ax.set_yticklabels(np.arange(1, q_max + 1))
+    ytick_step = max(1, q_max // 10)
+    yticks = np.arange(ytick_step - 1, q_max, ytick_step)
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticks + 1)
     ax.set_ylim(-0.5, q_max - 0.5)
     ax.set_xlim(xlim)
     ax.set_title(r"$|c|$ (log scale)")
-    if transitions:
-        ax.legend(fontsize=7)
-    # colorbar in dedicated column, only for heatmap row
-    cax = fig.add_subplot(gs[0, 1])
+    # colorbar: use the row-0 placeholder (make it visible again)
+    cax = fig.axes[n_plots]  # first dummy axes = row 0 col 1
+    cax.set_visible(True)
     fig.colorbar(im, cax=cax)
 
     # --- subplot 1: norm of cc, log scale ---
     ax = axes[1]
     norms = [np.linalg.norm(cc) for cc in cc_list]
     ax.plot(x, norms, "ko-", markersize=3, linewidth=1)
-    add_vlines(ax)
+    add_vlines(ax, with_label=True)
     ax.set_ylabel(r"$\|c\|$")
     ax.set_yscale("log")
     ax.set_xlim(xlim)
@@ -771,7 +778,7 @@ def plot_cc(f_out, out):
         ax.plot(x, residuals_before, "bo-", markersize=3, linewidth=1, label="before update")
         ax.plot(x, residuals_after,  "rs-", markersize=3, linewidth=1, label="after update")
         ax.axhline(p["coup"]["tol"], color="k", linestyle="--", linewidth=1, label="tol")
-        add_vlines(ax)
+        add_vlines(ax, with_label=False)
         ax.set_ylabel("Residual")
         ax.set_yscale("log")
         ax.set_xlim(xlim)
@@ -781,6 +788,10 @@ def plot_cc(f_out, out):
         ax.legend(fontsize=7)
     else:
         axes[-1].set_xlabel("IQN-ILS call index")
+
+    from matplotlib.ticker import MaxNLocator
+    for ax in axes:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     plt.tight_layout()
     fname = os.path.join(out, "cc_coefficients.pdf")
