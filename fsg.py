@@ -319,9 +319,11 @@ class FSG(svFSI):
                 ss = np.dot(np.transpose(qq), -self.res[-1])
                 cc = np.linalg.solve(rr, ss)
 
-                # debug: save coefficients
+                # debug: save coefficients and load step/sub-iter indices
                 if self.p["coup"].get("iqn_ils_debug", False):
                     self.debug_qr["cc"] += [cc.copy()]
+                    self.debug_qr["t"] += [t]
+                    self.debug_qr["n"] += [n]
 
                 # update
                 vec_new = dtk + np.dot(tmp_W, cc)

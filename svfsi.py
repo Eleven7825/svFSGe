@@ -133,7 +133,7 @@ class svFSI(Simulation):
         self.debug_qr = {
             "V_before": [], "W_before": [], "ncols_before": [],
             "Q": [], "R": [], "V_after": [], "W_after": [], "ncols_after": [],
-            "cc": [],
+            "cc": [], "t": [], "n": [],
         }
 
         # current/previous solution vector at interface and in volume
@@ -726,7 +726,7 @@ class svFSI(Simulation):
                             raise ValueError("no array in PointData: " + sv_names[f])
                         extr += [v2n(r.GetPointData().GetArray(sv_names[f]))]
                     sol = np.mean(np.array(extr), axis=0)
-                    if domain == "fluid":
+                    if domain == "fluid" and self.p.get("debug", False):
                         print(f"      {f}: extracted from {len(extr)} geometries")
                 self.curr.add((phys, f, "vol"), sol)
 
