@@ -291,6 +291,14 @@ class FSG(svFSI):
                 if n == 0 and self.p["coup"].get("iqn_ils_reset", False):
                     self.mat_V = []
                     self.mat_W = []
+                    # also clear dk and res so difference vectors don't span load steps
+                    self.dk["disp"] = [self.dk["disp"][-1]]
+                    self.res = [self.res[-1]]
+
+                # fall back to relaxation if no history vectors available yet
+                if not self.mat_V:
+                    self.coup_relax("solid", "disp", i, t, n)
+                    return
 
                 # maximum number of time steps used in IQN-ILS
                 nq = self.p["coup"]["iqn_ils_q"]

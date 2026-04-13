@@ -659,62 +659,128 @@ def plot_cc(f_out, out):
         return
     d = np.load(f_npy, allow_pickle=True).item()
     cc_list = d["cc"]
-    ncols_before = d["ncols_before"]
     ncols_after = d["ncols_after"]
     n_iter = len(cc_list)
+    q_max = max(ncols_after)
 
-    # find load-step transition boundaries directly from saved t indices
-    transitions = []  # call index of first entry of each new load step (after the first)
-    if "t" in d and len(d["t"]) == n_iter:
-        t_arr = np.array(d["t"])
+    # t and n per IQN call
+    has_tn = "t" in d and len(d["t"]) == n_iter
+    t_arr = np.array(d["t"]) if has_tn else None
+    n_arr = np.array(d["n"]) if has_tn else None
+
+    # load-step transition boundaries (first call index of each new t)
+    transitions = []
+    if has_tn:
         for idx in range(1, n_iter):
             if t_arr[idx] != t_arr[idx - 1]:
                 transitions.append(idx)
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), dpi=150)
+    # match residuals to IQN calls: use residual of the *next* sub-iter after
+    # each IQN call to show the effect of the update (the call's own n is before update)
+    residuals_before = None
+    residuals_after = None
+    f_json = os.path.join(f_out, "partitioned.json")
+    if has_tn and os.path.exists(f_json):
+        with open(f_json) as fh:
+            p = json.load(fh)
+        err = p.get("error", {})
+        if err:
+            first_key = next(iter(err))
+            err_steps = err[first_key]
+            res_b, res_a = [], []
+            for i in range(n_iter):
+                t, n = t_arr[i], n_arr[i]
+                if t < len(err_steps) and n < len(err_steps[t]):
+                    res_b.append(err_steps[t][n])
+                    # next sub-iter residual (after IQN update was applied)
+                    if n + 1 < len(err_steps[t]):
+                        res_a.append(err_steps[t][n + 1])
+                    else:
+                        res_a.append(np.nan)
+            if len(res_b) == n_iter:
+                residuals_before = np.array(res_b)
+                residuals_after = np.array(res_a)
 
-    # build labels from the actual t values at each transition
-    t_arr = np.array(d["t"]) if "t" in d and len(d["t"]) == n_iter else None
-
-    # top: norm of cc per IQN-ILS call
-    norms = [np.linalg.norm(cc) for cc in cc_list]
-    ax = axes[0]
-    ax.plot(range(n_iter), norms, "ko-", markersize=4, linewidth=1)
-    for xv in transitions:
-        t_from = t_arr[xv - 1] if t_arr is not None else "?"
-        t_to = t_arr[xv] if t_arr is not None else "?"
-        ax.axvline(xv - 0.5, color="r", linestyle="--", linewidth=1,
-                   label=f"t={t_from}$\\to${t_to}")
-    ax.set_ylabel(r"$\|c\|$")
-    ax.set_xlabel("IQN-ILS call index")
-    ax.set_title(r"Norm of IQN-ILS coefficients $c$")
-    ax.set_yscale("log")
-    ax.grid(True, which="both", alpha=0.4)
-    if transitions:
-        ax.legend(fontsize=8)
-
-    # bottom: heatmap of cc values
-    max_len = max(len(cc) for cc in cc_list)
-    mat = np.full((n_iter, max_len), np.nan)
+    # build absolute-value log-scale heatmap matrix, y from 1..q_max
+    mat = np.full((n_iter, q_max), np.nan)
     for i, cc in enumerate(cc_list):
-        mat[i, :len(cc)] = cc
-    ax = axes[1]
-    vmax = np.nanpercentile(np.abs(mat), 95)
-    im = ax.imshow(mat.T, aspect="auto", cmap="RdBu_r", vmin=-vmax, vmax=vmax, origin="lower")
-    for xv in transitions:
-        t_from = t_arr[xv - 1] if t_arr is not None else "?"
-        t_to = t_arr[xv] if t_arr is not None else "?"
-        ax.axvline(xv - 0.5, color="k", linestyle="--", linewidth=1,
-                   label=f"t={t_from}$\\to${t_to}")
-    # draw boundary between active coefficients and NaN (ncols_after - 0.5)
-    ax.step(range(n_iter), np.array(ncols_after) - 0.5, where="mid",
-            color="k", linewidth=1.5)
-    ax.set_xlabel("IQN-ILS call index")
+        mat[i, :len(cc)] = np.abs(cc)
+
+    n_plots = 3 if residuals_before is not None else 2
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.colors import LogNorm
+    # two columns: wide data column + narrow colorbar column (same for all rows)
+    cbar_width = 0.03
+    fig = plt.figure(figsize=(12, 3.5 * n_plots), dpi=150)
+    gs = GridSpec(n_plots, 2, figure=fig,
+                  width_ratios=[1 - cbar_width, cbar_width],
+                  hspace=0.35, wspace=0.02)
+    axes = [fig.add_subplot(gs[i, 0]) for i in range(n_plots)]
+    # share x across all data axes
+    for ax in axes[1:]:
+        axes[0].get_shared_x_axes().join(axes[0], ax)
+
+    x = np.arange(n_iter)
+    xlim = (-0.5, n_iter - 0.5)
+
+    def add_vlines(ax, color="k"):
+        for xv in transitions:
+            t_from = t_arr[xv - 1]
+            t_to = t_arr[xv]
+            ax.axvline(xv - 0.5, color=color, linestyle="--", linewidth=1,
+                       label=f"t={t_from}$\\to${t_to}")
+
+    # --- subplot 0: heatmap |cc|, log scale, integer y-ticks 1..q_max ---
+    ax = axes[0]
+    mat_plot = np.where(np.isnan(mat), np.nan, np.where(mat == 0, 1e-16, mat))
+    vmin = np.nanmin(mat_plot[mat_plot > 0])
+    vmax = np.nanmax(mat_plot)
+    im = ax.pcolormesh(np.arange(n_iter + 1) - 0.5,
+                       np.arange(q_max + 1) - 0.5,
+                       mat_plot.T,
+                       cmap="Reds", norm=LogNorm(vmin=vmin, vmax=vmax),
+                       shading="flat")
+    ax.step(x, np.array(ncols_after) - 0.5, where="mid", color="k", linewidth=1.5)
+    add_vlines(ax)
     ax.set_ylabel("Coefficient index")
-    ax.set_title(r"IQN-ILS coefficients $c$ (color capped at 95th percentile)")
+    ax.set_yticks(np.arange(q_max))
+    ax.set_yticklabels(np.arange(1, q_max + 1))
+    ax.set_ylim(-0.5, q_max - 0.5)
+    ax.set_xlim(xlim)
+    ax.set_title(r"$|c|$ (log scale)")
     if transitions:
-        ax.legend(fontsize=8)
-    plt.colorbar(im, ax=ax)
+        ax.legend(fontsize=7)
+    # colorbar in dedicated column, only for heatmap row
+    cax = fig.add_subplot(gs[0, 1])
+    fig.colorbar(im, cax=cax)
+
+    # --- subplot 1: norm of cc, log scale ---
+    ax = axes[1]
+    norms = [np.linalg.norm(cc) for cc in cc_list]
+    ax.plot(x, norms, "ko-", markersize=3, linewidth=1)
+    add_vlines(ax)
+    ax.set_ylabel(r"$\|c\|$")
+    ax.set_yscale("log")
+    ax.set_xlim(xlim)
+    ax.grid(True, which="both", alpha=0.4)
+    ax.set_title(r"Norm of IQN-ILS coefficients $c$")
+
+    # --- subplot 2: residual before and after each IQN update ---
+    if n_plots == 3:
+        ax = axes[2]
+        ax.plot(x, residuals_before, "bo-", markersize=3, linewidth=1, label="before update")
+        ax.plot(x, residuals_after,  "rs-", markersize=3, linewidth=1, label="after update")
+        ax.axhline(p["coup"]["tol"], color="k", linestyle="--", linewidth=1, label="tol")
+        add_vlines(ax)
+        ax.set_ylabel("Residual")
+        ax.set_yscale("log")
+        ax.set_xlim(xlim)
+        ax.grid(True, which="both", alpha=0.4)
+        ax.set_title("Coupling residual before/after IQN-ILS update")
+        ax.set_xlabel("IQN-ILS call index")
+        ax.legend(fontsize=7)
+    else:
+        axes[-1].set_xlabel("IQN-ILS call index")
 
     plt.tight_layout()
     fname = os.path.join(out, "cc_coefficients.pdf")
