@@ -706,6 +706,9 @@ def plot_cc(f_out, out):
         t_to = t_arr[xv] if t_arr is not None else "?"
         ax.axvline(xv - 0.5, color="k", linestyle="--", linewidth=1,
                    label=f"t={t_from}$\\to${t_to}")
+    # draw boundary between active coefficients and NaN (ncols_after - 0.5)
+    ax.step(range(n_iter), np.array(ncols_after) - 0.5, where="mid",
+            color="k", linewidth=1.5, label="active cols after filtering")
     ax.set_xlabel("IQN-ILS call index")
     ax.set_ylabel("Coefficient index")
     ax.set_title(r"IQN-ILS coefficients $c$ (color capped at 95th percentile)")
