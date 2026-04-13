@@ -287,6 +287,11 @@ class FSG(svFSI):
             if ((t == 0) or (t == 1 and n < 5)):# or n == 0:
                 self.coup_relax("solid", "disp", i, t, n)
             else:
+                # reset history vectors at start of each new load step if requested
+                if n == 0 and self.p["coup"].get("iqn_ils_reset", False):
+                    self.mat_V = []
+                    self.mat_W = []
+
                 # maximum number of time steps used in IQN-ILS
                 nq = self.p["coup"]["iqn_ils_q"]
 

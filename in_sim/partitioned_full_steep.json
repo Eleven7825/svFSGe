@@ -28,7 +28,8 @@
         "omega0": 0.1,
         "iqn_ils_q": 20,
         "iqn_ils_eps": 1.0e-1,
-        "iqn_ils_debug": true
+        "iqn_ils_debug": true,
+        "iqn_ils_reset": false
     },
     "nmax": 5,
     "fmax": 1.0,
