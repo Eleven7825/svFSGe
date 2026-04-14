@@ -137,6 +137,9 @@ class FSG(svFSI):
                     break
 
     def plot_convergence(self):
+        if not self.err:
+            print("no convergence data to plot (simulation may have failed before first coupling iteration)")
+            return
         n_sol = len(self.err.keys())
         col_err = "k"
         col_omg = "r"
@@ -252,52 +255,95 @@ class FSG(svFSI):
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        solid_centered = self.p["coup"].get("solid_centered", False)
 
-        # step 2: solid update
-        if self.step("solid", i, t, n, times):
-            return False
+        if solid_centered:
+            # solid-centered: R(tau) = F(S(tau)) - tau = 0
+
+            # initialize wss from Poiseuille flow before very first solid step
+            # (in fluid-centered mode fluid always runs first, so wss is never NaN
+            # when solid runs; in solid-centered we must bootstrap it here)
+            if i == 1:
+                self.poiseuille(t)
+
+            # step 1: solid update
+            if self.step("solid", i, t, n, times):
+                return False
+
+            # step 2: fluid update
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+        else:
+            # fluid-centered (default): R(d) = S(F(d)) - d = 0
+            # step 1: fluid update
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+
+            # step 2: solid update
+            if self.step("solid", i, t, n, times):
+                return False
+
+        # select fixed-point variable depending on formulation
+        if solid_centered:
+            # solid-centered: fixed-point variable is wss at fluid interface
+            fp_kind_curr = ("fluid", "wss", "int")
+            fp_kind_prev = ("fluid", "wss", "int")
+            fp_key = "wss"
+        else:
+            # fluid-centered: fixed-point variable is solid displacement at interface
+            fp_kind_curr = ("solid", "disp", "int")
+            fp_kind_prev = ("solid", "disp", "int")
+            fp_key = "disp"
 
         # log interface solution
-        dtk = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
-        dk = deepcopy(self.prev.get(("solid", "disp", "int"))).flatten()
+        dtk = deepcopy(self.curr.get(fp_kind_curr)).flatten()
+        dk = deepcopy(self.prev.get(fp_kind_prev)).flatten()
 
         # store increments
         # todo: save memory by only storing necessary information
-        self.dk["disp"] += [dtk]
+        self.dk[fp_key] += [dtk]
         self.res += [dtk - dk]
 
         # append difference vectors after preloading (must not span different time levels)
-        if t > 0 and n > 0:
-            self.mat_W += [self.dk["disp"][-1] - self.dk["disp"][-2]]
+        if t > 0 and n > 0 and len(self.dk[fp_key]) >= 2:
+            self.mat_W += [self.dk[fp_key][-1] - self.dk[fp_key][-2]]
             self.mat_V += [self.res[-1] - self.res[-2]]
 
         # get error
-        self.coup_err("solid", "disp", i, t, n)
+        self.coup_err("solid", fp_key, i, t, n, scalar_res=solid_centered)
 
-        # relax solid update
-        self.coup_omega("disp", i, t, n)
+        # relax update
+        self.coup_omega(fp_key, i, t, n)
         if not self.coup_converged(n):
             # no IQN-ILS update during preloading or first time step
             if ((t == 0) or (t == 1 and n < 5)):# or n == 0:
-                self.coup_relax("solid", "disp", i, t, n)
+                if solid_centered:
+                    self.coup_relax_wss(i, t, n)
+                else:
+                    self.coup_relax("solid", "disp", i, t, n)
             else:
                 # reset history vectors at start of each new load step if requested
                 if n == 0 and self.p["coup"].get("iqn_ils_reset", False):
                     self.mat_V = []
                     self.mat_W = []
-                    # also clear dk and res so difference vectors don't span load steps
-                    self.dk["disp"] = [self.dk["disp"][-1]]
-                    self.res = [self.res[-1]]
+                    # clear dk and res entirely so no cross-step difference vectors
+                    # are built at n=1 (dk needs at least 2 entries from the same
+                    # load step before mat_W/mat_V can be populated)
+                    self.dk[fp_key] = []
+                    self.res = []
 
                 # fall back to relaxation if no history vectors available yet
                 if not self.mat_V:
-                    self.coup_relax("solid", "disp", i, t, n)
+                    if solid_centered:
+                        self.coup_relax_wss(i, t, n)
+                    else:
+                        self.coup_relax("solid", "disp", i, t, n)
                     return
 
                 # maximum number of time steps used in IQN-ILS
@@ -338,9 +384,27 @@ class FSG(svFSI):
                     self.debug_qr["t"] += [t]
                     self.debug_qr["n"] += [n]
 
-                # update
+                # safety check: if ||cc|| is too large the IQN update is ill-conditioned;
+                # fall back to relaxation for this step to avoid divergence
+                cc_max = self.p["coup"].get("iqn_ils_cc_max", np.inf)
+                if np.linalg.norm(cc) > cc_max:
+                    if solid_centered:
+                        self.coup_relax_wss(i, t, n)
+                    else:
+                        self.coup_relax("solid", "disp", i, t, n)
+                    return
+
+                # update fixed-point variable
                 vec_new = dtk + np.dot(tmp_W, cc)
-                self.curr.add(("solid", "disp", "int"), vec_new.reshape((-1, 3)))
+                if solid_centered:
+                    # wss is scalar — write directly to bypass add()'s vector norm call
+                    map_v = self.curr.sim.map((("int", "fluid"), ("vol", "tube")))
+                    self.curr.sol["wss"][map_v] = vec_new
+                    map_src = self.curr.sim.map((("vol", "solid"), ("int", "fluid")))
+                    map_trg = self.curr.sim.map((("vol", "solid"), ("vol", "tube")))
+                    self.curr.sol["wss"][map_trg] = vec_new[map_src]
+                else:
+                    self.curr.add(("solid", "disp", "int"), vec_new.reshape((-1, 3)))
 
                 # store matrices
                 self.mat_V = tmp_V.T.tolist()
@@ -357,16 +421,32 @@ class FSG(svFSI):
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        solid_centered = self.p["coup"].get("solid_centered", False)
 
-        # step 2: solid update
-        if self.step("solid", i, t, n, times):
-            return False
+        if solid_centered:
+            # solid-centered: R(tau) = F(S(tau)) - tau = 0
+            # step 1: solid update
+            if self.step("solid", i, t, n, times):
+                return False
+
+            # step 2: fluid update
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+        else:
+            # fluid-centered (default): R(d) = S(F(d)) - d = 0
+            # step 1: fluid update
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+
+            # step 2: solid update
+            if self.step("solid", i, t, n, times):
+                return False
 
         # log interface solution for aitken relaxation
         dtk = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
@@ -475,12 +555,39 @@ class FSG(svFSI):
         dk = deepcopy(self.curr.get((domain, name, "int"))).flatten()
         self.dtk[name] += [dk]
 
-    def coup_err(self, domain, name, i, t, n):
+    def coup_relax_wss(self, i, t, n):
+        # relaxation for wss in solid-centered formulation
+        # wss is stored as a scalar magnitude; write directly to avoid add()'s norm call
+        curr_w = deepcopy(self.curr.get(("fluid", "wss", "int")))
+        prev_w = deepcopy(self.prev.get(("fluid", "wss", "int")))
+
+        if i == 1:
+            wss_relax = curr_w
+        else:
+            omega = self.p["coup"]["omega"]["wss"][-1][-1]
+            wss_relax = omega * curr_w + (1.0 - omega) * prev_w
+
+        # write relaxed scalar wss directly (bypasses add()'s norm call for vectors)
+        map_v = self.curr.sim.map((("int", "fluid"), ("vol", "tube")))
+        self.curr.sol["wss"][map_v] = wss_relax
+        # propagate to solid volume (wss assumed constant radially)
+        map_src = self.curr.sim.map((("vol", "solid"), ("int", "fluid")))
+        map_trg = self.curr.sim.map((("vol", "solid"), ("vol", "tube")))
+        self.curr.sol["wss"][map_trg] = wss_relax[map_src]
+
+        # log interface wss for relaxation tracking
+        dk = deepcopy(self.curr.get(("fluid", "wss", "int"))).flatten()
+        self.dtk["wss"] += [dk]
+
+    def coup_err(self, domain, name, i, t, n, scalar_res=False):
         if i == 1:
             # first step: no old solution
             err = 1.0
+        elif scalar_res:
+            # scalar fixed-point variable (e.g. wss in solid-centered formulation)
+            err = np.mean(np.abs(self.res[-1]))
         else:
-            # inf-norm on residual displacement L2-norm
+            # vector fixed-point variable (e.g. displacement): mean nodal L2-norm
             err = np.mean(np.linalg.norm(self.res[-1].reshape((-1, 3)), axis=1))
 
         # start a new sub-list for new load step

@@ -647,7 +647,8 @@ def collect_simulations(folder):
         param[f] = {}
         param[f]["KsKi"] = p_xml[f]["Add_equation"]["Constitutive_model"]["KsKi"]
         if p_json[f]:
-            param[f]["error"] = p_json[f]["error"]["disp"]
+            err = p_json[f].get("error", {})
+            param[f]["error"] = err.get("disp", err.get("wss", next(iter(err.values()), [])))
 
     return out, inp, param
 
@@ -661,6 +662,8 @@ def plot_cc(f_out, out):
     cc_list = d["cc"]
     ncols_after = d["ncols_after"]
     n_iter = len(cc_list)
+    if n_iter == 0:
+        return
     q_max = max(ncols_after)
 
     # t and n per IQN call

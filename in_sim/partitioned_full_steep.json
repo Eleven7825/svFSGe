@@ -29,7 +29,8 @@
         "iqn_ils_q": 5,
         "iqn_ils_eps": 1.0e-1,
         "iqn_ils_debug": true,
-        "iqn_ils_reset": true
+        "iqn_ils_reset": true,
+        "solid_centered": false
     },
     "nmax": 5,
     "fmax": 1.0,
