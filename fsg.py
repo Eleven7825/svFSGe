@@ -397,6 +397,13 @@ class FSG(svFSI):
                 # update fixed-point variable
                 vec_new = dtk + np.dot(tmp_W, cc)
                 if solid_centered:
+                    corr = np.dot(tmp_W, cc)
+                    p95 = np.percentile(dtk[dtk > 0], 95) if np.any(dtk > 0) else np.nan
+                    print(f"  [IQN-wss] t={t} n={n} ||cc||={np.linalg.norm(cc):.3e} "
+                          f"dtk=[{dtk.min():.3e},{dtk.max():.3e}] "
+                          f"corr=[{corr.min():.3e},{corr.max():.3e}] "
+                          f"vec_new=[{vec_new.min():.3e},{vec_new.max():.3e}] "
+                          f"n_neg={int(np.sum(vec_new<0))} n_spike={int(np.sum(vec_new>2*p95))}")
                     # wss is scalar — write directly to bypass add()'s vector norm call
                     map_v = self.curr.sim.map((("int", "fluid"), ("vol", "tube")))
                     self.curr.sol["wss"][map_v] = vec_new
@@ -477,6 +484,23 @@ class FSG(svFSI):
             # predict from file
             sol = self.predictor_tube(kind, t)
         self.curr.add(kind, sol)
+
+        # in solid-centered mode, predict WSS by extrapolating from converged history
+        # (same strategy as displacement: carry forward or linearly extrapolate)
+        # This ensures curr holds a consistent WSS at load step start rather than
+        # stale end-of-previous-step sub-iteration WSS
+        if self.p["coup"].get("solid_centered", False):
+            wss_kind = ("fluid", "wss", "vol")
+            n_sol = len(self.converged)
+            if n_sol == 0:
+                # no history yet: Poiseuille is the only option
+                self.poiseuille(t)
+            else:
+                # reuse or extrapolate from converged WSS — same logic as displacement
+                wss_pred = self.predictor(wss_kind, t)
+                # write scalar wss directly (bypasses add()'s vector norm call)
+                map_v = self.curr.sim.map((("vol", "fluid"), ("vol", "tube")))
+                self.curr.sol["wss"][map_v] = wss_pred
 
     def predictor(self, kind, t):
         # fluid, solid, tube
@@ -567,6 +591,12 @@ class FSG(svFSI):
             omega = self.p["coup"]["omega"]["wss"][-1][-1]
             wss_relax = omega * curr_w + (1.0 - omega) * prev_w
 
+        p95 = np.percentile(curr_w[curr_w > 0], 95) if np.any(curr_w > 0) else np.nan
+        print(f"  [relax-wss] t={t} n={n} omega={omega if i>1 else 1.0:.3f} "
+              f"curr=[{curr_w.min():.3e},{curr_w.max():.3e}] "
+              f"prev=[{prev_w.min():.3e},{prev_w.max():.3e}] "
+              f"relaxed=[{wss_relax.min():.3e},{wss_relax.max():.3e}] "
+              f"n_neg={int(np.sum(wss_relax<0))} n_spike={int(np.sum(wss_relax>2*p95))}")
         # write relaxed scalar wss directly (bypasses add()'s norm call for vectors)
         map_v = self.curr.sim.map((("int", "fluid"), ("vol", "tube")))
         self.curr.sol["wss"][map_v] = wss_relax

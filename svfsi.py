@@ -369,7 +369,11 @@ class svFSI(Simulation):
 
         # set wss
         props = v2n(solid.GetPointData().GetArray(name))
-        props[:, 6] = self.curr.get(("solid", "wss", "vol"))
+        wss_in = self.curr.get(("solid", "wss", "vol"))
+        p95 = np.percentile(wss_in[wss_in > 0], 95) if np.any(wss_in > 0) else np.nan
+        n_spike = int(np.sum(wss_in > 2 * p95))
+        print(f"  [set_solid] t={t} n={n} wss: min={wss_in.min():.4e} max={wss_in.max():.4e} mean={wss_in.mean():.4e} p95={p95:.4e} n_spike(>2*p95)={n_spike}")
+        props[:, 6] = wss_in
 
         # set time
         props[:, 7] = t + 1
