@@ -17,7 +17,7 @@
         "q0_rate": 200.0
     },
     "n_max": {
-        "fluid": 10,
+        "fluid": 400,
         "mesh": 1,
         "solid": 1
     },
