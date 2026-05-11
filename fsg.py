@@ -8,6 +8,7 @@ import os
 import glob
 import time
 from copy import deepcopy
+from collections import defaultdict
 import argparse
 
 import matplotlib.pyplot as plt
@@ -38,10 +39,176 @@ class FSG(svFSI):
         self.p["f_out"] = "."
         self.plot_convergence()
 
-    def run(self):
+    def save_restart(self, t, i):
+        """Save all coupling state after converged load step t."""
+        data = {
+            "t": t,
+            "i": i,
+            "converged_count": len(self.converged),
+            # store absolute path so load_restart can copy svFSI binary files
+            "f_out": self.p["f_out"],
+        }
+
+        # IQN-ILS history: mat_W, mat_V (lists of 1D arrays)
+        data["mat_W_count"] = len(self.mat_W)
+        for j, v in enumerate(self.mat_W):
+            data[f"mat_W_{j}"] = np.asarray(v)
+        data["mat_V_count"] = len(self.mat_V)
+        for j, v in enumerate(self.mat_V):
+            data[f"mat_V_{j}"] = np.asarray(v)
+
+        # residual and displacement increment lists (shared by IQN-ILS and aitken)
+        data["res_count"] = len(self.res)
+        for j, v in enumerate(self.res):
+            data[f"res_{j}"] = np.asarray(v)
+
+        # dk: defaultdict(list) of lists of arrays — keyed by field name (e.g. "disp")
+        data["dk_keys"] = np.array(list(self.dk.keys()), dtype=object)
+        for k, vlist in self.dk.items():
+            data[f"dk_{k}_count"] = len(vlist)
+            for j, v in enumerate(vlist):
+                data[f"dk_{k}_{j}"] = np.asarray(v)
+
+        # dtk: same structure as dk (used by aitken fallback in IQN-ILS)
+        data["dtk_keys"] = np.array(list(self.dtk.keys()), dtype=object)
+        for k, vlist in self.dtk.items():
+            data[f"dtk_{k}_count"] = len(vlist)
+            for j, v in enumerate(vlist):
+                data[f"dtk_{k}_{j}"] = np.asarray(v)
+
+        # err: defaultdict of lists-of-lists (load step -> sub-iteration errors)
+        data["err_keys"] = np.array(list(self.err.keys()), dtype=object)
+        for k, steps in self.err.items():
+            data[f"err_{k}_nsteps"] = len(steps)
+            for si, sublist in enumerate(steps):
+                data[f"err_{k}_{si}"] = np.asarray(sublist)
+
+        # omega: same nested structure as err
+        omega = self.p["coup"]["omega"]
+        data["omega_keys"] = np.array(list(omega.keys()), dtype=object)
+        for k, steps in omega.items():
+            data[f"omega_{k}_nsteps"] = len(steps)
+            for si, sublist in enumerate(steps):
+                data[f"omega_{k}_{si}"] = np.asarray(sublist)
+
+        # current solution (needed to reconstruct boundary conditions on resume)
+        for fname, arr in self.curr.sol.items():
+            if arr is not None:
+                data[f"curr_{fname}"] = np.asarray(arr)
+
+        # converged solutions (needed for predictor extrapolation)
+        for ci, sol in enumerate(self.converged):
+            for fname, arr in sol.sol.items():
+                if arr is not None:
+                    data[f"converged_{ci}_{fname}"] = np.asarray(arr)
+
+        # debug QR data (only populated when iqn_ils_debug is True)
+        if self.p["coup"].get("iqn_ils_debug", False):
+            np.save(os.path.join(self.p["f_out"], "restart_debug_qr.npy"), self.debug_qr)
+
+        # snapshot stFile_last.bin for each solver alongside restart.npz so that
+        # load_restart always gets the correct binary state even if later (failed)
+        # load steps overwrite stFile_last.bin after the checkpoint was saved
+        f_stfiles = os.path.join(self.p["f_out"], "restart_stfiles")
+        os.makedirs(f_stfiles, exist_ok=True)
+        for solver_subdir in self.p["out"].values():
+            src = os.path.join(self.p["f_out"], solver_subdir, "stFile_last.bin")
+            if os.path.exists(src):
+                shutil.copy(src, os.path.join(f_stfiles, solver_subdir.replace("/", "_") + "_stFile_last.bin"))
+
+        f_restart = os.path.join(self.p["f_out"], "restart.npz")
+        np.savez(f_restart, **data)
+        print(f"  [restart] saved to {f_restart} (t={t}, i={i})")
+
+    def load_restart(self, f_restart):
+        """Restore coupling state from restart file. Returns (t_done, i_done) of last completed step."""
+        data = np.load(f_restart, allow_pickle=True)
+
+        t = int(data["t"])
+        i = int(data["i"])
+        n_conv = int(data["converged_count"])
+
+        # IQN-ILS history matrices
+        self.mat_W = [data[f"mat_W_{j}"] for j in range(int(data["mat_W_count"]))]
+        self.mat_V = [data[f"mat_V_{j}"] for j in range(int(data["mat_V_count"]))]
+
+        # residual list
+        self.res = [data[f"res_{j}"] for j in range(int(data["res_count"]))]
+
+        # dk
+        self.dk = defaultdict(list)
+        for k in data["dk_keys"]:
+            self.dk[k] = [data[f"dk_{k}_{j}"] for j in range(int(data[f"dk_{k}_count"]))]
+
+        # dtk
+        self.dtk = defaultdict(list)
+        for k in data["dtk_keys"]:
+            self.dtk[k] = [data[f"dtk_{k}_{j}"] for j in range(int(data[f"dtk_{k}_count"]))]
+
+        # err
+        self.err = defaultdict(list)
+        for k in data["err_keys"]:
+            n_steps = int(data[f"err_{k}_nsteps"])
+            self.err[k] = [list(data[f"err_{k}_{si}"]) for si in range(n_steps)]
+
+        # omega
+        for k in data["omega_keys"]:
+            n_steps = int(data[f"omega_{k}_nsteps"])
+            self.p["coup"]["omega"][k] = [list(data[f"omega_{k}_{si}"]) for si in range(n_steps)]
+
+        # current solution
+        for fname in self.curr.sol.keys():
+            key = f"curr_{fname}"
+            if key in data.files:
+                self.curr.sol[fname] = data[key]
+
+        # converged solutions
+        self.converged = []
+        for ci in range(n_conv):
+            sol = self.curr.copy()
+            for fname in sol.sol.keys():
+                key = f"converged_{ci}_{fname}"
+                if key in data.files:
+                    sol.sol[fname] = data[key]
+            self.converged.append(sol)
+
+        # copy snapshotted stFile_last.bin files into the new run's solver directories.
+        # We use the snapshot saved alongside restart.npz (in restart_stfiles/) rather
+        # than the live stFile_last.bin, because later (failed) load steps may have
+        # overwritten the live file after the checkpoint was taken.
+        old_f_out = str(data["f_out"])
+        f_stfiles_snap = os.path.join(os.path.dirname(f_restart), "restart_stfiles")
+        for solver_subdir in self.p["out"].values():
+            dst_dir = os.path.join(self.p["f_out"], solver_subdir)
+            os.makedirs(dst_dir, exist_ok=True)
+            snap = os.path.join(f_stfiles_snap, solver_subdir.replace("/", "_") + "_stFile_last.bin")
+            live = os.path.join(old_f_out, solver_subdir, "stFile_last.bin")
+            src = snap if os.path.exists(snap) else live
+            if os.path.exists(src):
+                shutil.copy(src, os.path.join(dst_dir, "stFile_last.bin"))
+                label = "snapshot" if src == snap else "live"
+                print(f"  [restart] copied {label} stFile -> {dst_dir}/")
+            else:
+                print(f"  [restart] WARNING: no stFile found for {solver_subdir} — solver will start without restart")
+
+        print(f"  [restart] loaded from {f_restart} (resuming after t={t}, i={i})")
+        return t, i
+
+    def run(self, f_restart=None):
+        # CLI flag takes precedence; fall back to JSON "restart" field
+        if f_restart is None:
+            f_restart = self.p.get("restart", None)
+
+        # restore coupling state if restarting
+        t_start, i_start = 0, 0
+        if f_restart is not None:
+            t_done, i_done = self.load_restart(f_restart)
+            t_start = t_done + 1
+            i_start = i_done  # preserve counter so svFSI file numbering stays consistent
+
         # run simulation
         try:
-            self.main()
+            self.main(t_start=t_start, i_start=i_start)
         except KeyboardInterrupt:
             print("interrupted")
             pass
@@ -55,13 +222,13 @@ class FSG(svFSI):
         # post process
         main_arg([self.p["f_out"]])
 
-    def main(self):
+    def main(self, t_start=0, i_start=0):
         # print reynolds number
         print("Re = " + str(int(self.p["re"])))
 
         # loop load steps
-        i = 0
-        for t in range(self.p["nmax"] + 1):
+        i = i_start
+        for t in range(t_start, self.p["nmax"] + 1):
             print(
                 "=" * 30
                 + " t "
@@ -132,6 +299,10 @@ class FSG(svFSI):
 
                     # archive
                     self.converged += [self.curr.copy()]
+
+                    # save restart checkpoint (opt-in via JSON "save_restart" flag)
+                    if self.p.get("save_restart", False):
+                        self.save_restart(t, i)
 
                     # terminate coupling
                     break
@@ -551,10 +722,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("sim", help="simulation parameters (.json)")
     parser.add_argument("-post", action="store_true", help="post-process only")
+    parser.add_argument("-restart", default=None, help="path to restart.npz checkpoint file")
     args = parser.parse_args()
 
     fsg = FSG(args.sim)
     if args.post:
         fsg.run_post()
     else:
-        fsg.run()
+        fsg.run(f_restart=args.restart)
