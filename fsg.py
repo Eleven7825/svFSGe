@@ -39,11 +39,13 @@ class FSG(svFSI):
         self.p["f_out"] = "."
         self.plot_convergence()
 
-    def save_restart(self, t, i):
-        """Save all coupling state after converged load step t."""
+    def save_restart(self, t, i, n, after_solver):
+        """Save coupling state checkpoint. after_solver is 'mesh', 'fluid', or 'solid'."""
         data = {
             "t": t,
             "i": i,
+            "n": n,
+            "after_solver": after_solver,
             "converged_count": len(self.converged),
             # store absolute path so load_restart can copy svFSI binary files
             "f_out": self.p["f_out"],
@@ -96,36 +98,51 @@ class FSG(svFSI):
             if arr is not None:
                 data[f"curr_{fname}"] = np.asarray(arr)
 
+        # prev solution (needed when resuming from mesh or fluid checkpoint)
+        if self.prev is not None:
+            for fname, arr in self.prev.sol.items():
+                if arr is not None:
+                    data[f"prev_{fname}"] = np.asarray(arr)
+
         # converged solutions (needed for predictor extrapolation)
         for ci, sol in enumerate(self.converged):
             for fname, arr in sol.sol.items():
                 if arr is not None:
                     data[f"converged_{ci}_{fname}"] = np.asarray(arr)
 
+        # all restart files live under a dedicated restart/ subdirectory
+        f_restart_dir = os.path.join(self.p["f_out"], "restart")
+        os.makedirs(f_restart_dir, exist_ok=True)
+
+        f_stem = f"restart_t{t:03d}_n{n:03d}_{after_solver}"
+
         # debug QR data (only populated when iqn_ils_debug is True)
         if self.p["coup"].get("iqn_ils_debug", False):
-            np.save(os.path.join(self.p["f_out"], "restart_debug_qr.npy"), self.debug_qr)
+            f_qr = os.path.join(f_restart_dir, f_stem + "_debug_qr.npy")
+            np.save(f_qr, self.debug_qr)
 
-        # snapshot stFile_last.bin for each solver alongside restart.npz so that
-        # load_restart always gets the correct binary state even if later (failed)
-        # load steps overwrite stFile_last.bin after the checkpoint was saved
-        f_stfiles = os.path.join(self.p["f_out"], "restart_stfiles")
+        # snapshot stFile_last.bin for each solver; store in a per-checkpoint directory
+        # so later (failed) load steps cannot overwrite the snapshotted binaries
+        f_stfiles = os.path.join(f_restart_dir, f_stem + "_stfiles")
         os.makedirs(f_stfiles, exist_ok=True)
         for solver_subdir in self.p["out"].values():
             src = os.path.join(self.p["f_out"], solver_subdir, "stFile_last.bin")
             if os.path.exists(src):
                 shutil.copy(src, os.path.join(f_stfiles, solver_subdir.replace("/", "_") + "_stFile_last.bin"))
 
-        f_restart = os.path.join(self.p["f_out"], "restart.npz")
+        f_restart = os.path.join(f_restart_dir, f_stem + ".npz")
         np.savez(f_restart, **data)
-        print(f"  [restart] saved to {f_restart} (t={t}, i={i})")
+        print(f"  [restart] saved to {f_restart} (t={t}, n={n}, after={after_solver}, i={i})")
 
     def load_restart(self, f_restart):
-        """Restore coupling state from restart file. Returns (t_done, i_done) of last completed step."""
+        """Restore coupling state from restart file. Returns (t_done, i_done, n_done, solver_done)."""
         data = np.load(f_restart, allow_pickle=True)
 
         t = int(data["t"])
         i = int(data["i"])
+        # n and after_solver absent in old-format files; default to solid/0 for backward compat
+        n_done = int(data["n"]) if "n" in data.files else 0
+        after_solver = str(data["after_solver"]) if "after_solver" in data.files else "solid"
         n_conv = int(data["converged_count"])
 
         # IQN-ILS history matrices
@@ -162,6 +179,12 @@ class FSG(svFSI):
             if key in data.files:
                 self.curr.sol[fname] = data[key]
 
+        # prev solution (present in mesh/fluid checkpoints)
+        for fname in self.prev.sol.keys():
+            key = f"prev_{fname}"
+            if key in data.files:
+                self.prev.sol[fname] = data[key]
+
         # converged solutions
         self.converged = []
         for ci in range(n_conv):
@@ -173,11 +196,10 @@ class FSG(svFSI):
             self.converged.append(sol)
 
         # copy snapshotted stFile_last.bin files into the new run's solver directories.
-        # We use the snapshot saved alongside restart.npz (in restart_stfiles/) rather
-        # than the live stFile_last.bin, because later (failed) load steps may have
-        # overwritten the live file after the checkpoint was taken.
+        # stfiles dir is named after the checkpoint file (backward compat: restart.npz → restart_stfiles/)
         old_f_out = str(data["f_out"])
-        f_stfiles_snap = os.path.join(os.path.dirname(f_restart), "restart_stfiles")
+        f_stem = os.path.splitext(os.path.basename(f_restart))[0]
+        f_stfiles_snap = os.path.join(os.path.dirname(f_restart), f_stem + "_stfiles")
         for solver_subdir in self.p["out"].values():
             dst_dir = os.path.join(self.p["f_out"], solver_subdir)
             os.makedirs(dst_dir, exist_ok=True)
@@ -191,8 +213,8 @@ class FSG(svFSI):
             else:
                 print(f"  [restart] WARNING: no stFile found for {solver_subdir} — solver will start without restart")
 
-        print(f"  [restart] loaded from {f_restart} (resuming after t={t}, i={i})")
-        return t, i
+        print(f"  [restart] loaded from {f_restart} (t={t}, n={n_done}, after={after_solver}, i={i})")
+        return t, i, n_done, after_solver
 
     def run(self, f_restart=None):
         # CLI flag takes precedence; fall back to JSON "restart" field
@@ -200,15 +222,32 @@ class FSG(svFSI):
             f_restart = self.p.get("restart", None)
 
         # restore coupling state if restarting
-        t_start, i_start = 0, 0
+        t_start, i_start, n_start, skip_first_n_solvers = 0, 0, 0, []
         if f_restart is not None:
-            t_done, i_done = self.load_restart(f_restart)
-            t_start = t_done + 1
-            i_start = i_done  # preserve counter so svFSI file numbering stays consistent
+            t_done, i_done, n_done, solver_done = self.load_restart(f_restart)
+            if solver_done == "solid":
+                # fully converged step: advance to next load step
+                t_start = t_done + 1
+                n_start = 0
+                i_start = i_done
+                skip_first_n_solvers = []
+            elif solver_done == "fluid":
+                # fluid done, solid still needed for sub-iteration n_done
+                t_start = t_done
+                n_start = n_done
+                i_start = i_done - 1  # main increments i at loop top, so -1 here
+                skip_first_n_solvers = ["mesh", "fluid"]
+            elif solver_done == "mesh":
+                # mesh done, fluid+solid still needed for sub-iteration n_done
+                t_start = t_done
+                n_start = n_done
+                i_start = i_done - 1
+                skip_first_n_solvers = ["mesh"]
 
         # run simulation
         try:
-            self.main(t_start=t_start, i_start=i_start)
+            self.main(t_start=t_start, i_start=i_start,
+                      n_start=n_start, skip_first_n_solvers=skip_first_n_solvers)
         except KeyboardInterrupt:
             print("interrupted")
             pass
@@ -222,7 +261,10 @@ class FSG(svFSI):
         # post process
         main_arg([self.p["f_out"]])
 
-    def main(self, t_start=0, i_start=0):
+    def main(self, t_start=0, i_start=0, n_start=0, skip_first_n_solvers=None):
+        if skip_first_n_solvers is None:
+            skip_first_n_solvers = []
+
         # print reynolds number
         print("Re = " + str(int(self.p["re"])))
 
@@ -239,21 +281,29 @@ class FSG(svFSI):
                 + "=" * 30
             )
 
-            # predict solution for next load step
-            if t > 0:
+            # predict solution for next load step; skip when resuming mid-step (predict
+            # was already called before the checkpoint was taken)
+            resuming_mid_step = (t == t_start and n_start > 0)
+            if t > 0 and not resuming_mid_step:
                 self.coup_predict(i, t)
 
+            # sub-iteration loop starts at n_start for the first resumed load step
+            n_loop_start = n_start if t == t_start else 0
+
             # loop sub-iterations
-            for n in range(self.p["coup"]["nmax"]):
+            for n in range(n_loop_start, self.p["coup"]["nmax"]):
                 # count total iterations (load + sub-iterations)
                 i += 1
+
+                # pass skip list only for the very first sub-iteration of a mid-step resume
+                skip = skip_first_n_solvers if (t == t_start and n == n_loop_start and skip_first_n_solvers) else []
 
                 # perform coupling step
                 times = {}
                 if self.p["coup"]["method"] in ["static", "aitken"]:
-                    status = self.coup_step_relax(i, t, n, times)
+                    status = self.coup_step_relax(i, t, n, times, skip_solvers=skip)
                 elif self.p["coup"]["method"] == "iqn_ils":
-                    status = self.coup_step_iqn_ils(i, t, n, times)
+                    status = self.coup_step_iqn_ils(i, t, n, times, skip_solvers=skip)
                 else:
                     raise ValueError(
                         "Unknown coupling method " + self.p["coup"]["method"]
@@ -302,7 +352,7 @@ class FSG(svFSI):
 
                     # save restart checkpoint (opt-in via JSON "save_restart" flag)
                     if self.p.get("save_restart", False):
-                        self.save_restart(t, i)
+                        self.save_restart(t, i, n, "solid")
 
                     # terminate coupling
                     break
@@ -412,23 +462,37 @@ class FSG(svFSI):
             trg = os.path.join(self.p["f_arx"], os.path.basename(src))
             shutil.copyfile(src, trg)
 
-    def coup_step_iqn_ils(self, i, t, n, times):
+    def coup_step_iqn_ils(self, i, t, n, times, skip_solvers=None):
+        skip_solvers = skip_solvers or []
+        save = self.p.get("save_restart", False)
+
         # step 0: mesh movement (not in first first iteration)
-        if self.p["fsi"] and i > 1:
-            if self.step("mesh", i, t, n, times):
-                return False
+        if "mesh" not in skip_solvers:
+            if self.p["fsi"] and i > 1:
+                if self.step("mesh", i, t, n, times):
+                    return False
+            else:
+                times["mesh"] = 0.0
+            if save:
+                self.save_restart(t, i, n, "mesh")
         else:
             times["mesh"] = 0.0
 
-        # store previous solutions
-        self.prev = self.curr.copy()
+        # store previous solutions (skip when fluid is also skipped: prev already restored)
+        if "fluid" not in skip_solvers:
+            self.prev = self.curr.copy()
 
         # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
+        if "fluid" not in skip_solvers:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+            if save:
+                self.save_restart(t, i, n, "fluid")
         else:
-            self.poiseuille(t)
+            times["fluid"] = 0.0
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
@@ -519,21 +583,35 @@ class FSG(svFSI):
         else:
             return True
 
-    def coup_step_relax(self, i, t, n, times):
-        # step 0: mesh movement (not in very first iteration)
-        if self.p["fsi"] and i > 1:
-            if self.step("mesh", i, t, n, times):
-                return False
+    def coup_step_relax(self, i, t, n, times, skip_solvers=None):
+        skip_solvers = skip_solvers or []
+        save = self.p.get("save_restart", False)
 
-        # store previous solutions
-        self.prev = self.curr.copy()
+        # step 0: mesh movement (not in very first iteration)
+        if "mesh" not in skip_solvers:
+            if self.p["fsi"] and i > 1:
+                if self.step("mesh", i, t, n, times):
+                    return False
+            if save:
+                self.save_restart(t, i, n, "mesh")
+        else:
+            times["mesh"] = 0.0
+
+        # store previous solutions (skip when fluid is also skipped: prev already restored)
+        if "fluid" not in skip_solvers:
+            self.prev = self.curr.copy()
 
         # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
+        if "fluid" not in skip_solvers:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
+            if save:
+                self.save_restart(t, i, n, "fluid")
         else:
-            self.poiseuille(t)
+            times["fluid"] = 0.0
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
@@ -596,6 +674,8 @@ class FSG(svFSI):
 
         # linearly extrapolate from previous load increment
         vec_m1 = self.converged[-2].get(kind)
+        if self.p.get("disable_predictor", False):
+            return vec_m0
         # if n_sol == 2:
         return 2.0 * vec_m0 - vec_m1
 
