@@ -19,6 +19,7 @@ from svfsi import svFSI, sv_names
 from post import main_arg
 
 from utilities import QRfiltering_mod
+from filter_interface import gaussian_filter_interface
 
 
 class FSG(svFSI):
@@ -303,6 +304,14 @@ class FSG(svFSI):
                     # save restart checkpoint (opt-in via JSON "save_restart" flag)
                     if self.p.get("save_restart", False):
                         self.save_restart(t, i)
+
+                    # post-convergence spatial filter on interface displacement
+                    if self.p.get("filter_post", False):
+                        pts_int = self.points[("int", "solid")]
+                        disp_int = self.curr.get(("solid", "disp", "int"))
+                        disp_filtered = gaussian_filter_interface(
+                            disp_int, pts_int, self.p["filter_post"])
+                        self.curr.add(("solid", "disp", "int"), disp_filtered)
 
                     # terminate coupling
                     break
