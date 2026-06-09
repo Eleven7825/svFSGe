@@ -19,7 +19,7 @@ from svfsi import svFSI, sv_names
 from post import main_arg
 
 from utilities import QRfiltering_mod
-from filter_interface import gaussian_filter_interface
+from filter_interface import gaussian_filter_interface, laplacian_filter_interface, build_adjacency
 
 
 class FSG(svFSI):
@@ -30,6 +30,12 @@ class FSG(svFSI):
     def __init__(self, f_params=None):
         # svFSI simulations
         svFSI.__init__(self, f_params)
+
+        # pre-build interface adjacency list for Laplacian filter (method="laplacian")
+        self._lap_adj = None
+        fp = self.p.get("filter_post", {})
+        if isinstance(fp, dict) and fp.get("method", "gaussian") == "laplacian":
+            self._lap_adj = build_adjacency(self.mesh[("int", "solid")])
 
     def run_post(self):
         # todo: read in automatically
@@ -307,10 +313,19 @@ class FSG(svFSI):
 
                     # post-convergence spatial filter on interface displacement
                     if self.p.get("filter_post", False):
-                        pts_int = self.points[("int", "solid")]
+                        fp     = self.p["filter_post"]
+                        method = fp.get("method", "gaussian")
                         disp_int = self.curr.get(("solid", "disp", "int"))
-                        disp_filtered = gaussian_filter_interface(
-                            disp_int, pts_int, self.p["filter_post"])
+                        if method == "laplacian":
+                            if self._lap_adj is None:
+                                self._lap_adj = build_adjacency(
+                                    self.mesh[("int", "solid")])
+                            disp_filtered = laplacian_filter_interface(
+                                disp_int, self._lap_adj, fp)
+                        else:
+                            pts_int = self.points[("int", "solid")]
+                            disp_filtered = gaussian_filter_interface(
+                                disp_int, pts_int, fp)
                         self.curr.add(("solid", "disp", "int"), disp_filtered)
 
                     # terminate coupling

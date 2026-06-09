@@ -1,20 +1,26 @@
 """
-Boundary-corrected Gaussian spatial filter for the FSI interface displacement.
+Spatial filters for the FSI interface displacement (post-convergence).
 
-Mirrors the kernel from the C++ gr_nonlocal.cpp (Appendix C), applied here at
-the nodal level on the inner-wall interface mesh instead of at element Gauss
-points.  All length inputs are in the same physical units as the mesh (cm).
+Two methods are available:
 
-Parameters (passed as a dict):
-    l_s    : circumferential characteristic length  [cm]
-    l_z    : axial characteristic length            [cm]
-    beta   : boundary floor factor (gamma at wall)  [–]  default 0.5
-    t_nl   : transition parameter                   [–]  default 1.0
-    lo     : vessel length                          [cm]
-    curve  : centreline curvature parameter         [–]  default 0.0
-    ro_tol : radial layer tolerance                 [cm] default 0.01
+gaussian — Boundary-corrected Gaussian kernel in the (θ, z) plane.
+    Mirrors gr_nonlocal.cpp (Appendix C).  Parameters:
+        l_s    : circumferential characteristic length  [cm]
+        l_z    : axial characteristic length            [cm]
+        beta   : boundary floor factor (gamma at wall)  [–]  default 0.5
+        t_nl   : transition parameter                   [–]  default 1.0
+        lo     : vessel length                          [cm]
+        curve  : centreline curvature parameter         [–]  default 0.0
+        ro_tol : radial layer tolerance                 [cm] default 0.01
+
+laplacian — Iterative Laplacian (Taubin-style) smoothing over the interface
+    mesh topology.  Adjacency is built once from the VTK polydata cell list
+    and cached.  Parameters:
+        lambda_lp : per-iteration step size  (0 < λ < 0.5; warn if ≥ 0.5)
+        n_iter    : number of smoothing iterations  (int ≥ 1)
 """
 
+import warnings
 import numpy as np
 
 
@@ -95,6 +101,76 @@ def gaussian_filter_interface(disp_int, pts_ref, params):
         disp_filtered[i] = acc / w_sum if w_sum > 0.0 else disp_int[i]
 
     return disp_filtered
+
+
+def build_adjacency(mesh_polydata):
+    """
+    Build an adjacency list from a VTK polydata interface mesh.
+
+    Two nodes are adjacent if they share at least one cell (edge or face).
+    Returns a list of sets: adj[i] = {j, k, ...} of neighbour node indices.
+    The mesh polydata is the raw VTK object stored in svfsi.py as
+    self.mesh[("int", "solid")].
+    """
+    n_pts = mesh_polydata.GetNumberOfPoints()
+    adj = [set() for _ in range(n_pts)]
+    cells = mesh_polydata.GetPolys()
+    if cells is None or cells.GetNumberOfCells() == 0:
+        # fallback: try generic cell iterator
+        cells = mesh_polydata.GetCells()
+    cells.InitTraversal()
+    id_list = __import__("vtk").vtkIdList()
+    while cells.GetNextCell(id_list):
+        n = id_list.GetNumberOfIds()
+        ids = [id_list.GetId(k) for k in range(n)]
+        for a in range(n):
+            for b in range(n):
+                if a != b:
+                    adj[ids[a]].add(ids[b])
+    return adj
+
+
+def laplacian_filter_interface(disp_int, adj, params):
+    """
+    Apply iterative Laplacian smoothing to interface displacement.
+
+    Each iteration:
+        u[i] ← u[i] + λ · (mean(u[neighbours_i]) − u[i])
+
+    Parameters
+    ----------
+    disp_int : (N, 3) ndarray   — converged interface displacement
+    adj      : list of sets     — adjacency list from build_adjacency()
+    params   : dict with keys:
+                 lambda_lp  : smoothing step size  (0 < λ < 0.5 recommended)
+                 n_iter     : number of iterations  (int ≥ 1)
+
+    Returns
+    -------
+    disp_filtered : (N, 3) ndarray
+    """
+    lam    = params["lambda_lp"]
+    n_iter = int(params.get("n_iter", 1))
+
+    if lam >= 0.5:
+        warnings.warn(
+            f"laplacian_filter_interface: lambda_lp={lam} ≥ 0.5 — "
+            "smoothing may be unstable (recommended: λ < 0.5).",
+            UserWarning, stacklevel=2)
+
+    u = disp_int.copy().astype(float)
+    N = len(u)
+
+    for _ in range(n_iter):
+        u_new = u.copy()
+        for i in range(N):
+            nb = list(adj[i])
+            if not nb:
+                continue
+            u_new[i] = u[i] + lam * (u[nb].mean(axis=0) - u[i])
+        u = u_new
+
+    return u
 
 
 def kernel_weights(i0, pts_ref, params):
