@@ -31,11 +31,23 @@ class FSG(svFSI):
         # svFSI simulations
         svFSI.__init__(self, f_params)
 
-        # pre-build interface adjacency list for Laplacian filter (method="laplacian")
+        # pre-build interface adjacency list once; shared by filter_post and filter_iter
         self._lap_adj = None
-        fp = self.p.get("filter_post", {})
-        if isinstance(fp, dict) and fp.get("method", "gaussian") == "laplacian":
-            self._lap_adj = build_adjacency(self.mesh[("int", "solid")])
+        for fkey in ("filter_post", "filter_iter"):
+            fp = self.p.get(fkey, {})
+            if isinstance(fp, dict) and fp.get("method", "gaussian") == "laplacian":
+                self._lap_adj = build_adjacency(self.mesh[("int", "solid")])
+                break
+
+    def _apply_filter(self, disp_3d, fp):
+        """Apply the configured spatial filter (Gaussian or Laplacian) to (N,3) displacement."""
+        method = fp.get("method", "gaussian")
+        if method == "laplacian":
+            if self._lap_adj is None:
+                self._lap_adj = build_adjacency(self.mesh[("int", "solid")])
+            return laplacian_filter_interface(disp_3d, self._lap_adj, fp)
+        else:
+            return gaussian_filter_interface(disp_3d, self.points[("int", "solid")], fp)
 
     def run_post(self):
         # todo: read in automatically
@@ -313,19 +325,9 @@ class FSG(svFSI):
 
                     # post-convergence spatial filter on interface displacement
                     if self.p.get("filter_post", False):
-                        fp     = self.p["filter_post"]
-                        method = fp.get("method", "gaussian")
                         disp_int = self.curr.get(("solid", "disp", "int"))
-                        if method == "laplacian":
-                            if self._lap_adj is None:
-                                self._lap_adj = build_adjacency(
-                                    self.mesh[("int", "solid")])
-                            disp_filtered = laplacian_filter_interface(
-                                disp_int, self._lap_adj, fp)
-                        else:
-                            pts_int = self.points[("int", "solid")]
-                            disp_filtered = gaussian_filter_interface(
-                                disp_int, pts_int, fp)
+                        disp_filtered = self._apply_filter(
+                            disp_int, self.p["filter_post"])
                         self.curr.add(("solid", "disp", "int"), disp_filtered)
 
                     # terminate coupling
@@ -462,6 +464,14 @@ class FSG(svFSI):
         dtk = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
         dk = deepcopy(self.prev.get(("solid", "disp", "int"))).flatten()
 
+        # per-iteration filter: apply before history logging so V/W assembles from
+        # filtered displacements; IQN correction is then added on top of filtered dtk
+        if self.p.get("filter_iter", False):
+            dtk_3d = self._apply_filter(
+                dtk.reshape(-1, 3), self.p["filter_iter"])
+            dtk = dtk_3d.flatten()
+            self.curr.add(("solid", "disp", "int"), dtk_3d)
+
         # store increments
         # todo: save memory by only storing necessary information
         self.dk["disp"] += [dtk]
@@ -566,6 +576,14 @@ class FSG(svFSI):
         # log interface solution for aitken relaxation
         dtk = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
         dk = deepcopy(self.prev.get(("solid", "disp", "int"))).flatten()
+
+        # per-iteration filter: smooth solid output before history logging
+        if self.p.get("filter_iter", False):
+            dtk_3d = self._apply_filter(
+                dtk.reshape(-1, 3), self.p["filter_iter"])
+            dtk = dtk_3d.flatten()
+            self.curr.add(("solid", "disp", "int"), dtk_3d)
+
         self.dk["disp"] += [dtk]
         self.res += [dtk - dk]
 
