@@ -31,14 +31,11 @@
     },
     "nmax": 2,
     "fmax": 1.0,
-    "filter_post": {
-        "l_s":    0.127,
-        "l_z":    0.75,
-        "beta":   0.5,
-        "t_nl":   1.0,
-        "lo":     15.0,
-        "curve":  0.0,
-        "ro_tol": 0.01
+    "filter_post": false,
+    "filter_iter": {
+        "method":    "laplacian",
+        "lambda_lp": 0.3,
+        "n_iter":    1
     },
     "predict_file": false,
     "exe": {
