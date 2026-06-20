@@ -417,12 +417,18 @@ class FSG(svFSI):
             trg = os.path.join(self.p["f_arx"], os.path.basename(src))
             shutil.copyfile(src, trg)
 
-    def _neural_operator_step(self, times, i):
+    def _neural_operator_step(self, times, i, t):
         """Replace mesh + fluid: LDDMM registration → pull-back → NN → WSS + pressure."""
         disp       = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
         solid_xyz  = self.points[("int", "solid")]             # (N_solid, 3) reference
         solid_mesh = self.mesh[("int", "solid")]               # vtkPolyData connectivity
         wss, pressure = self.no.predict_wss_and_pressure(disp, solid_xyz, solid_mesh, call_id=i)
+        # NN predicts gauge pressure (CFD with zero outlet BC).
+        # Add the absolute outlet pressure baseline p0 * p_vec[t] to match Poiseuille convention.
+        p0 = self.p["fluid"]["p0"] * self.p_vec[t]
+        pressure = pressure + p0
+        print(f"[NO] WSS    range: [{wss.min():.4f}, {wss.max():.4f}]  mean={wss.mean():.4f}")
+        print(f"[NO] press  range: [{pressure.min():.4f}, {pressure.max():.4f}]  mean={pressure.mean():.4f}")
         self.curr.add(("fluid", "wss", "int"), wss)
         self.curr.add(("solid", "press", "int"), pressure)
         times["mesh"] = 0.0
@@ -431,7 +437,7 @@ class FSG(svFSI):
     def coup_step_iqn_ils(self, i, t, n, times):
         # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
         if self.no is not None:
-            self._neural_operator_step(times, i)
+            self._neural_operator_step(times, i, t)
         elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
@@ -541,7 +547,7 @@ class FSG(svFSI):
     def coup_step_relax(self, i, t, n, times):
         # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
         if self.no is not None:
-            self._neural_operator_step(times, i)
+            self._neural_operator_step(times, i, t)
         elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False

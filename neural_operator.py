@@ -68,29 +68,37 @@ def _load_vtk_points(path):
 
 def _write_surface_vtk(polydata, xyz, out_path):
     """
-    Write a vtkPolyData with updated node positions to a legacy ASCII VTK file.
-    Applies vtkTriangleFilter to ensure triangulated cells (required by fshapesTk).
+    Write a vtkPolyData with updated node positions in fshapesTk-compatible
+    VTK 2.0 ASCII format (one point per line, POLYGONS with '3 v1 v2 v3' rows).
+    Applies vtkTriangleFilter to ensure triangulated cells.
     """
-    # Update points on a copy
+    # Triangulate (interface.vtp cells may be quads)
     poly = vtk.vtkPolyData()
     poly.DeepCopy(polydata)
-
-    pts = vtk.vtkPoints()
-    pts.SetNumberOfPoints(len(xyz))
-    for i, (x, y, z) in enumerate(xyz):
-        pts.SetPoint(i, float(x), float(y), float(z))
-    poly.SetPoints(pts)
-
-    # Triangulate (interface.vtp cells may be quads)
     tri = vtk.vtkTriangleFilter()
     tri.SetInputData(poly)
     tri.Update()
+    tri_pd = tri.GetOutput()
 
-    writer = vtk.vtkPolyDataWriter()
-    writer.SetFileName(out_path)
-    writer.SetInputData(tri.GetOutput())
-    writer.SetFileTypeToASCII()
-    writer.Write()
+    n_pts   = len(xyz)
+    n_cells = tri_pd.GetNumberOfCells()
+
+    with open(out_path, "w") as f:
+        f.write("# vtk DataFile Version 2.0\n")
+        f.write("fshape interface\n")
+        f.write("ASCII\n")
+        f.write("DATASET POLYDATA\n")
+        f.write(f"POINTS {n_pts} float\n")
+        for x, y, z in xyz:
+            f.write(f"{float(x):.6f} {float(y):.6f} {float(z):.6f}\n")
+        f.write(f"\nPOLYGONS {n_cells} {4 * n_cells}\n")
+        id_list = vtk.vtkIdList()
+        for ci in range(n_cells):
+            tri_pd.GetCellPoints(ci, id_list)
+            v0 = id_list.GetId(0)
+            v1 = id_list.GetId(1)
+            v2 = id_list.GetId(2)
+            f.write(f"3 {v0} {v1} {v2}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +219,7 @@ class NeuralOperator:
 
         cmd = [
             self.matlab_exe,
+            "-nojvm", "-nodisplay", "-nosplash",
             "-sd", self.lddmm_script_dir,
             "-batch",
             (f"lddmm_register_single("

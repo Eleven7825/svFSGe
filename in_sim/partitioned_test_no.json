@@ -37,19 +37,20 @@
         "svd_template_vtk": "/home/shiyi/TAA_CFD_pipeline/vtk/cylinder.vtk",
         "matlab_exe": "/home/shiyi/matlab/bin/matlab",
         "lddmm_script_dir": "/home/shiyi/TAA_CFD_pipeline",
-        "work_dir": "/home/shiyi/fsg_no_work",
+        "work_dir": "/tmp/fsg_no_work",
         "branch_dims": [24, 64, 64, 64],
         "trunk_dims": [3, 64, 64, 64],
         "final_dim": 64,
-        "mode": 8
+        "mode": 8,
+        "model_dir": "/home/shiyi/ShapeOperatorLearning"
     },
     "nmax": 2,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {
-        "fluid": "/svfsi/svFSI-build/bin/svFSI",
-        "mesh": "/svfsi/svFSI-build/bin/svFSI",
-        "solid": "/svfsi/svFSI-build/bin/svFSI"
+        "fluid": "/home/shiyi/svFSGe/svfsi_docker.sh",
+        "mesh": "/home/shiyi/svFSGe/svfsi_docker.sh",
+        "solid": "/home/shiyi/svFSGe/svfsi_docker.sh"
     },
     "inp": {
         "fluid": "steady_full.xml",
@@ -74,10 +75,10 @@
     },
     "name": "partitioned",
     "paths_linux_ubuntu": {
-        "in_geo": "/svFSGe/in_geo",
-        "in_petsc": "/svFSGe/in_petsc",
-        "in_svfsi": "/svFSGe/in_svfsi_plus",
-        "exe": "/",
+        "in_geo": "/home/shiyi/svFSGe/in_geo",
+        "in_petsc": "/home/shiyi/svFSGe/in_petsc",
+        "in_svfsi": "/home/shiyi/svFSGe/in_svfsi_plus",
+        "exe": "/home/shiyi/svfsi/svFSI-build/bin",
         "root": "."
     },
     "paths_linux_centos": {
