@@ -19,6 +19,7 @@ from svfsi import svFSI, sv_names
 from post import main_arg
 
 from utilities import QRfiltering_mod
+from neural_operator import NeuralOperator
 
 
 class FSG(svFSI):
@@ -29,6 +30,10 @@ class FSG(svFSI):
     def __init__(self, f_params=None):
         # svFSI simulations
         svFSI.__init__(self, f_params)
+
+        # neural operator surrogate (replaces fluid + mesh per sub-iteration)
+        no_cfg = self.p.get("neural_operator", {})
+        self.no = NeuralOperator(no_cfg) if no_cfg.get("enabled") else None
 
     def run_post(self):
         # todo: read in automatically
@@ -412,9 +417,20 @@ class FSG(svFSI):
             trg = os.path.join(self.p["f_arx"], os.path.basename(src))
             shutil.copyfile(src, trg)
 
+    def _neural_operator_step(self, times):
+        """Replace mesh + fluid with NN inference (includes IDW interpolation)."""
+        disp      = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
+        solid_xyz = self.points[("int", "solid")]             # (N_solid, 3) reference
+        wss = self.no.predict_wss(disp, solid_xyz)            # (N_solid, 3)
+        self.curr.add(("fluid", "wss", "int"), wss)
+        times["mesh"] = 0.0
+        times["fluid"] = 0.0
+
     def coup_step_iqn_ils(self, i, t, n, times):
-        # step 0: mesh movement (not in first first iteration)
-        if self.p["fsi"] and i > 1:
+        # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
+        if self.no is not None:
+            self._neural_operator_step(times)
+        elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
         else:
@@ -423,12 +439,13 @@ class FSG(svFSI):
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        # step 1: fluid update (skipped when neural operator is active)
+        if self.no is None:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
@@ -520,20 +537,23 @@ class FSG(svFSI):
             return True
 
     def coup_step_relax(self, i, t, n, times):
-        # step 0: mesh movement (not in very first iteration)
-        if self.p["fsi"] and i > 1:
+        # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
+        if self.no is not None:
+            self._neural_operator_step(times)
+        elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
 
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        # step 1: fluid update (skipped when neural operator is active)
+        if self.no is None:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
