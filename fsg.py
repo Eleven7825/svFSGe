@@ -424,8 +424,7 @@ class FSG(svFSI):
         solid_mesh = self.mesh[("int", "solid")]               # vtkPolyData connectivity
         wss, pressure = self.no.predict_wss_and_pressure(disp, solid_xyz, solid_mesh, call_id=i)
         self.curr.add(("fluid", "wss", "int"), wss)
-        if pressure is not None:
-            self.curr.add(("solid", "press", "int"), pressure)
+        self.curr.add(("solid", "press", "int"), pressure)
         times["mesh"] = 0.0
         times["fluid"] = 0.0
 

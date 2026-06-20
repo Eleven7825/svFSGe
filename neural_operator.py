@@ -22,7 +22,7 @@ Per-sub-iteration inference pipeline:
 Required config keys (under "neural_operator" in JSON):
   enabled           – bool
   pt_file           – path to WSS shear_stress_model.pt
-  pressure_pt_file  – path to pressure shear_stress_model.pt (optional)
+  pressure_pt_file  – path to pressure shear_stress_model.pt (required)
   svd_basis_file    – path to *_basis.npz  (Ux, Uy, Uz)
   svd_template_vtk  – path to cylinder.vtk  (672 nodes, LDDMM template)
   matlab_exe        – path to MATLAB executable
@@ -169,16 +169,13 @@ class NeuralOperator:
             pt_file=cfg["pt_file"],
         )
 
-        # Pressure model (out_dim=1) — optional
-        pressure_pt = cfg.get("pressure_pt_file")
-        if pressure_pt:
-            self.pressure_model = self._load_model(
-                ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
-                pt_file=pressure_pt,
-            )
-            print(f"[NeuralOperator] pressure model: {pressure_pt}")
-        else:
-            self.pressure_model = None
+        # Pressure model (out_dim=1) — required: solid solver always needs interface pressure
+        pressure_pt = cfg["pressure_pt_file"]
+        self.pressure_model = self._load_model(
+            ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
+            pt_file=pressure_pt,
+        )
+        print(f"[NeuralOperator] pressure model: {pressure_pt}")
 
         print(f"[NeuralOperator] WSS model: {cfg['pt_file']}")
         print(f"[NeuralOperator] cylinder template: {len(self.cyl_xyz)} nodes, modes: {self.mode}")
@@ -306,7 +303,7 @@ class NeuralOperator:
         Returns
         -------
         wss      : (N_solid, 3)
-        pressure : (N_solid,) or None if pressure_model is None
+        pressure : (N_solid,)
         """
         solid_disp = np.asarray(solid_disp, dtype=np.float32)
         solid_xyz  = np.asarray(solid_xyz,  dtype=np.float32)
@@ -340,11 +337,9 @@ class NeuralOperator:
         # 7. WSS forward pass → (N_solid, 3)
         wss = self._forward(self.model, coeffs_t, xyz_t)
 
-        # 8. Pressure forward pass → (N_solid,) or None
-        pressure = None
-        if self.pressure_model is not None:
-            p_raw    = self._forward(self.pressure_model, coeffs_t, xyz_t)  # (N_solid, 1)
-            pressure = p_raw.squeeze(-1)                                     # (N_solid,)
+        # 8. Pressure forward pass → (N_solid,)
+        p_raw    = self._forward(self.pressure_model, coeffs_t, xyz_t)  # (N_solid, 1)
+        pressure = p_raw.squeeze(-1)                                     # (N_solid,)
 
         return wss, pressure
 
