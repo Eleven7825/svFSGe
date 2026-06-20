@@ -427,8 +427,6 @@ class FSG(svFSI):
         # Add the absolute outlet pressure baseline p0 * p_vec[t] to match Poiseuille convention.
         p0 = self.p["fluid"]["p0"] * self.p_vec[t]
         pressure = pressure + p0
-        print(f"[NO] WSS    range: [{wss.min():.4f}, {wss.max():.4f}]  mean={wss.mean():.4f}")
-        print(f"[NO] press  range: [{pressure.min():.4f}, {pressure.max():.4f}]  mean={pressure.mean():.4f}")
         self.curr.add(("fluid", "wss", "int"), wss)
         self.curr.add(("solid", "press", "int"), pressure)
         times["mesh"] = 0.0
