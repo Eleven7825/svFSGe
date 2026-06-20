@@ -418,12 +418,14 @@ class FSG(svFSI):
             shutil.copyfile(src, trg)
 
     def _neural_operator_step(self, times, i):
-        """Replace mesh + fluid: LDDMM registration → pull-back → NN → WSS."""
+        """Replace mesh + fluid: LDDMM registration → pull-back → NN → WSS + pressure."""
         disp       = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
         solid_xyz  = self.points[("int", "solid")]             # (N_solid, 3) reference
         solid_mesh = self.mesh[("int", "solid")]               # vtkPolyData connectivity
-        wss = self.no.predict_wss(disp, solid_xyz, solid_mesh, call_id=i)
+        wss, pressure = self.no.predict_wss_and_pressure(disp, solid_xyz, solid_mesh, call_id=i)
         self.curr.add(("fluid", "wss", "int"), wss)
+        if pressure is not None:
+            self.curr.add(("solid", "press", "int"), pressure)
         times["mesh"] = 0.0
         times["fluid"] = 0.0
 

@@ -1,5 +1,5 @@
 """
-Neural operator surrogate for wall shear stress (WSS) prediction in svFSGe.
+Neural operator surrogate for WSS and pressure prediction in svFSGe.
 
 Replaces the MESH + FLUID svFSI solvers within each FSI coupling sub-iteration.
 
@@ -15,25 +15,27 @@ Per-sub-iteration inference pipeline:
        For each FEM node, find k nearest shoot16 nodes;
        the corresponding cylinder nodes give the reference position
        (cylinder_node[i] ↔ shoot16_node[i] by LDDMM particle correspondence)
-  7. NN forward pass: trunk = pulled-back FEM positions, branch = coefficients
-     → WSS directly at solid FEM interface nodes (no back-mapping needed)
+  7. NN forward passes (WSS + pressure): trunk = pulled-back FEM positions,
+     branch = coefficients
+     → WSS (N_solid, 3) and pressure (N_solid,) at solid FEM interface nodes
 
 Required config keys (under "neural_operator" in JSON):
-  enabled          – bool
-  pt_file          – path to shear_stress_model.pt
-  svd_basis_file   – path to *_basis.npz  (Ux, Uy, Uz)
-  svd_template_vtk – path to cylinder.vtk  (672 nodes, LDDMM template)
-  matlab_exe       – path to MATLAB executable
-  lddmm_script_dir – directory containing lddmm_register_single.m
-  work_dir         – writable scratch directory for VTK files and LDDMM output
-  branch_dims      – list[int]
-  trunk_dims       – list[int]
-  final_dim        – int
-  mode             – int   (SVD modes; default = branch_dims[0] // 3)
-  idw_k            – int   (IDW neighbours; default 8)
-  idw_power        – float (IDW exponent;  default 2)
-  model_dir        – path to ShapeOperatorLearning (optional)
-  matlab_timeout   – int   MATLAB timeout in seconds (default 600)
+  enabled           – bool
+  pt_file           – path to WSS shear_stress_model.pt
+  pressure_pt_file  – path to pressure shear_stress_model.pt (optional)
+  svd_basis_file    – path to *_basis.npz  (Ux, Uy, Uz)
+  svd_template_vtk  – path to cylinder.vtk  (672 nodes, LDDMM template)
+  matlab_exe        – path to MATLAB executable
+  lddmm_script_dir  – directory containing lddmm_register_single.m
+  work_dir          – writable scratch directory for VTK files and LDDMM output
+  branch_dims       – list[int]
+  trunk_dims        – list[int]
+  final_dim         – int
+  mode              – int   (SVD modes; default = branch_dims[0] // 3)
+  idw_k             – int   (IDW neighbours; default 8)
+  idw_power         – float (IDW exponent;  default 2)
+  model_dir         – path to ShapeOperatorLearning (optional)
+  matlab_timeout    – int   MATLAB timeout in seconds (default 600)
 """
 
 import os
@@ -158,23 +160,44 @@ class NeuralOperator:
         self.idw_k     = cfg.get("idw_k", 8)
         self.idw_power = cfg.get("idw_power", 2.0)
 
-        # Trained model
-        model = ShearStressNN(
-            branch_dims=branch_dims,
-            trunk_dims=list(cfg["trunk_dims"]),
-            final_dim=cfg.get("final_dim", 64),
+        trunk_dims = list(cfg["trunk_dims"])
+        final_dim  = cfg.get("final_dim", 64)
+
+        # WSS model (out_dim=3)
+        self.model = self._load_model(
+            ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=3,
+            pt_file=cfg["pt_file"],
         )
-        ckpt  = torch.load(os.path.expanduser(cfg["pt_file"]), map_location="cpu")
+
+        # Pressure model (out_dim=1) — optional
+        pressure_pt = cfg.get("pressure_pt_file")
+        if pressure_pt:
+            self.pressure_model = self._load_model(
+                ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
+                pt_file=pressure_pt,
+            )
+            print(f"[NeuralOperator] pressure model: {pressure_pt}")
+        else:
+            self.pressure_model = None
+
+        print(f"[NeuralOperator] WSS model: {cfg['pt_file']}")
+        print(f"[NeuralOperator] cylinder template: {len(self.cyl_xyz)} nodes, modes: {self.mode}")
+        print(f"[NeuralOperator] MATLAB: {self.matlab_exe}")
+        print(f"[NeuralOperator] work dir: {self.work_dir}")
+
+    def _load_model(self, cls, branch_dims, trunk_dims, final_dim, out_dim, pt_file):
+        model = cls(
+            branch_dims=branch_dims,
+            trunk_dims=trunk_dims,
+            final_dim=final_dim,
+            out_dim=out_dim,
+        )
+        ckpt  = torch.load(os.path.expanduser(pt_file), map_location="cpu")
         state = {k.replace("module.", ""): v for k, v in ckpt["model_state_dict"].items()}
         model.load_state_dict(state)
         model.to(self.device)
         model.eval()
-        self.model = model
-
-        print(f"[NeuralOperator] model: {cfg['pt_file']}")
-        print(f"[NeuralOperator] cylinder template: {len(self.cyl_xyz)} nodes, modes: {self.mode}")
-        print(f"[NeuralOperator] MATLAB: {self.matlab_exe}")
-        print(f"[NeuralOperator] work dir: {self.work_dir}")
+        return model
 
     # ------------------------------------------------------------------
     # LDDMM
@@ -248,12 +271,30 @@ class NeuralOperator:
         return _apply_idw(self.cyl_xyz, idxs, weights)
 
     # ------------------------------------------------------------------
-    # Main inference entry point
+    # Batched NN forward pass
     # ------------------------------------------------------------------
 
-    def predict_wss(self, solid_disp, solid_xyz, solid_mesh, call_id=0):
+    def _forward(self, model, coeffs_t, xyz_t, batch=1000):
+        """Run model in batches; returns numpy array."""
+        preds = []
+        with torch.no_grad():
+            for start in range(0, len(xyz_t), batch):
+                out = model(
+                    coeffs_t[start:start+batch],
+                    xyz_t[start:start+batch],
+                )
+                preds.append(out.cpu())
+        return torch.cat(preds).numpy().astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Main inference entry points
+    # ------------------------------------------------------------------
+
+    def predict_wss_and_pressure(self, solid_disp, solid_xyz, solid_mesh, call_id=0):
         """
-        Predict WSS at solid interface nodes via LDDMM registration + NN.
+        Predict WSS and (optionally) pressure at solid interface nodes.
+
+        Runs LDDMM once, then does one forward pass per active model.
 
         Parameters
         ----------
@@ -264,7 +305,8 @@ class NeuralOperator:
 
         Returns
         -------
-        wss : (N_solid, 3)
+        wss      : (N_solid, 3)
+        pressure : (N_solid,) or None if pressure_model is None
         """
         solid_disp = np.asarray(solid_disp, dtype=np.float32)
         solid_xyz  = np.asarray(solid_xyz,  dtype=np.float32)
@@ -277,7 +319,7 @@ class NeuralOperator:
         output_dir  = os.path.join(self.work_dir, f"lddmm_{call_id}")
         _write_surface_vtk(solid_mesh, current_xyz, target_vtk)
 
-        # 3. Run LDDMM
+        # 3. Run LDDMM (once per sub-iteration)
         shoot16_pts = self._run_lddmm(target_vtk, output_dir)   # (N_cyl, 3)
 
         # 4. LDDMM displacement at cylinder nodes → SVD coefficients
@@ -290,19 +332,23 @@ class NeuralOperator:
         # 5. Pull back solid FEM nodes to cylinder reference space
         trunk_input = self._pull_back(solid_xyz, shoot16_pts)   # (N_solid, 3)
 
-        # 6. NN forward pass — trunk = pulled-back FEM positions
+        # 6. Shared tensors
         n_pts    = len(trunk_input)
         coeffs_t = torch.from_numpy(np.tile(coeffs, (n_pts, 1))).to(self.device)
         xyz_t    = torch.from_numpy(trunk_input).to(self.device)
 
-        preds = []
-        with torch.no_grad():
-            for start in range(0, n_pts, 1000):
-                out = self.model(
-                    coeffs_t[start:start+1000],
-                    xyz_t[start:start+1000],
-                )
-                preds.append(out.cpu())
+        # 7. WSS forward pass → (N_solid, 3)
+        wss = self._forward(self.model, coeffs_t, xyz_t)
 
-        # WSS is returned directly at solid FEM node positions (no back-mapping)
-        return torch.cat(preds).numpy().astype(np.float32)  # (N_solid, 3)
+        # 8. Pressure forward pass → (N_solid,) or None
+        pressure = None
+        if self.pressure_model is not None:
+            p_raw    = self._forward(self.pressure_model, coeffs_t, xyz_t)  # (N_solid, 1)
+            pressure = p_raw.squeeze(-1)                                     # (N_solid,)
+
+        return wss, pressure
+
+    def predict_wss(self, solid_disp, solid_xyz, solid_mesh, call_id=0):
+        """Backward-compatible wrapper that returns only WSS."""
+        wss, _ = self.predict_wss_and_pressure(solid_disp, solid_xyz, solid_mesh, call_id)
+        return wss

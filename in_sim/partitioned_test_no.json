@@ -32,6 +32,7 @@
     "neural_operator": {
         "enabled": true,
         "pt_file": "/home/shiyi/ShapeOperatorLearning/results_TAA/coeff_b24_64_t3_64_n600/shear_stress_model.pt",
+        "pressure_pt_file": "/home/shiyi/ShapeOperatorLearning/results_TAA/pressure_b24_64_t3_64_n600/shear_stress_model.pt",
         "svd_basis_file": "/home/shiyi/TAA_CFD_pipeline/coefficient_data_m8_basis.npz",
         "svd_template_vtk": "/home/shiyi/TAA_CFD_pipeline/vtk/cylinder.vtk",
         "matlab_exe": "/home/shiyi/matlab/bin/matlab",
