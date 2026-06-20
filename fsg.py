@@ -417,11 +417,12 @@ class FSG(svFSI):
             trg = os.path.join(self.p["f_arx"], os.path.basename(src))
             shutil.copyfile(src, trg)
 
-    def _neural_operator_step(self, times):
-        """Replace mesh + fluid with NN inference (includes IDW interpolation)."""
-        disp      = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
-        solid_xyz = self.points[("int", "solid")]             # (N_solid, 3) reference
-        wss = self.no.predict_wss(disp, solid_xyz)            # (N_solid, 3)
+    def _neural_operator_step(self, times, i):
+        """Replace mesh + fluid: LDDMM registration → pull-back → NN → WSS."""
+        disp       = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
+        solid_xyz  = self.points[("int", "solid")]             # (N_solid, 3) reference
+        solid_mesh = self.mesh[("int", "solid")]               # vtkPolyData connectivity
+        wss = self.no.predict_wss(disp, solid_xyz, solid_mesh, call_id=i)
         self.curr.add(("fluid", "wss", "int"), wss)
         times["mesh"] = 0.0
         times["fluid"] = 0.0
@@ -429,7 +430,7 @@ class FSG(svFSI):
     def coup_step_iqn_ils(self, i, t, n, times):
         # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
         if self.no is not None:
-            self._neural_operator_step(times)
+            self._neural_operator_step(times, i)
         elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
@@ -539,7 +540,7 @@ class FSG(svFSI):
     def coup_step_relax(self, i, t, n, times):
         # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
         if self.no is not None:
-            self._neural_operator_step(times)
+            self._neural_operator_step(times, i)
         elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False

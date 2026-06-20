@@ -1,44 +1,46 @@
 """
-Neural operator surrogate for wall shear stress (WSS) prediction.
+Neural operator surrogate for wall shear stress (WSS) prediction in svFSGe.
 
 Replaces the MESH + FLUID svFSI solvers within each FSI coupling sub-iteration.
 
-Geometry encoding pipeline (per sub-iteration):
-  1. Solid interface displacement (N_solid, 3) at solid FEM mesh nodes
-  2. IDW interpolation → LDDMM reference nodes (N_lddmm, 3)
-  3. Project onto SVD basis (Ux, Uy, Uz) → geometry coefficients (3*mode,)
-  4. DeepONet forward pass at ref_xyz → WSS (N_lddmm, 3)
-  5. IDW interpolation back → solid interface nodes (N_solid, 3)
+Per-sub-iteration inference pipeline:
+  1. Compute current solid interface positions = solid_xyz + solid_disp
+  2. Write surface as legacy ASCII VTK (triangulated)
+  3. Call MATLAB LDDMM: register cylinder.vtk → current surface
+     → reads back 1-shoot-16.vtk (deformed cylinder nodes in physical space)
+  4. Compute LDDMM displacement at cylinder nodes:
+       disp_cyl = shoot16_pts - cylinder_pts
+  5. Project onto SVD basis → geometry branch coefficients
+  6. Pull back solid FEM nodes to reference (cylinder) space:
+       For each FEM node, find k nearest shoot16 nodes;
+       the corresponding cylinder nodes give the reference position
+       (cylinder_node[i] ↔ shoot16_node[i] by LDDMM particle correspondence)
+  7. NN forward pass: trunk = pulled-back FEM positions, branch = coefficients
+     → WSS directly at solid FEM interface nodes (no back-mapping needed)
 
-The LDDMM reference geometry and SVD basis are precomputed by:
-  TAA_CFD_pipeline/coefficients_convert.py  (basis)
-  TAA_CFD_pipeline/vtk/cylinder.vtk         (ref_xyz_vtk_path)
-
-Config keys (all under "neural_operator" in the JSON):
-  enabled              – bool, set true to activate
-  pt_file              – path to shear_stress_model.pt
-  svd_basis_file       – path to *_basis.npz (Ux, Uy, Uz)
-  svd_template_vtk     – path to cylinder.vtk (LDDMM template used to compute SVD basis)
-  trunk_xyz_vtk        – path to sample_00001/1-shoot-16.vtk (fixed evaluation grid,
-                         must match the ref_xyz_vtk_path used during training)
-  branch_dims          – list[int]
-  trunk_dims           – list[int]
-  final_dim            – int
-  mode                 – int, SVD modes (default = branch_dims[0] // 3)
-  idw_k                – int, IDW nearest neighbours (default 8)
-  idw_power            – float, IDW power (default 2)
-  model_dir            – path to ShapeOperatorLearning (optional)
-
-Two distinct 672-node grids:
-  svd_template_vtk  – cylinder.vtk: used ONLY for projecting solid displacement
-                      onto SVD basis (same nodes the basis was computed on)
-  trunk_xyz_vtk     – 1-shoot-16.vtk of sample_00001: fixed collocation points
-                      fed as trunk input to the NN (must match training)
+Required config keys (under "neural_operator" in JSON):
+  enabled          – bool
+  pt_file          – path to shear_stress_model.pt
+  svd_basis_file   – path to *_basis.npz  (Ux, Uy, Uz)
+  svd_template_vtk – path to cylinder.vtk  (672 nodes, LDDMM template)
+  matlab_exe       – path to MATLAB executable
+  lddmm_script_dir – directory containing lddmm_register_single.m
+  work_dir         – writable scratch directory for VTK files and LDDMM output
+  branch_dims      – list[int]
+  trunk_dims       – list[int]
+  final_dim        – int
+  mode             – int   (SVD modes; default = branch_dims[0] // 3)
+  idw_k            – int   (IDW neighbours; default 8)
+  idw_power        – float (IDW exponent;  default 2)
+  model_dir        – path to ShapeOperatorLearning (optional)
+  matlab_timeout   – int   MATLAB timeout in seconds (default 600)
 """
 
 import os
 import sys
 import importlib
+import subprocess
+import tempfile
 
 import numpy as np
 import torch
@@ -47,6 +49,10 @@ from scipy.spatial import cKDTree
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 
+
+# ---------------------------------------------------------------------------
+# VTK I/O helpers
+# ---------------------------------------------------------------------------
 
 def _load_vtk_points(path):
     path = os.path.expanduser(path)
@@ -58,55 +64,63 @@ def _load_vtk_points(path):
     return vtk_to_numpy(reader.GetOutput().GetPoints().GetData()).astype(np.float32)
 
 
-def _idw_weights(src_xyz, dst_xyz, k, power):
+def _write_surface_vtk(polydata, xyz, out_path):
     """
-    Precompute IDW weights: for each point in dst, a sparse set of (indices, weights)
-    into src.
+    Write a vtkPolyData with updated node positions to a legacy ASCII VTK file.
+    Applies vtkTriangleFilter to ensure triangulated cells (required by fshapesTk).
+    """
+    # Update points on a copy
+    poly = vtk.vtkPolyData()
+    poly.DeepCopy(polydata)
 
-    Returns
-    -------
-    indices : (N_dst, k)  int
-    weights : (N_dst, k)  float32
-    """
+    pts = vtk.vtkPoints()
+    pts.SetNumberOfPoints(len(xyz))
+    for i, (x, y, z) in enumerate(xyz):
+        pts.SetPoint(i, float(x), float(y), float(z))
+    poly.SetPoints(pts)
+
+    # Triangulate (interface.vtp cells may be quads)
+    tri = vtk.vtkTriangleFilter()
+    tri.SetInputData(poly)
+    tri.Update()
+
+    writer = vtk.vtkPolyDataWriter()
+    writer.SetFileName(out_path)
+    writer.SetInputData(tri.GetOutput())
+    writer.SetFileTypeToASCII()
+    writer.Write()
+
+
+# ---------------------------------------------------------------------------
+# IDW helpers
+# ---------------------------------------------------------------------------
+
+def _idw_weights(src_xyz, dst_xyz, k, power):
+    """Return (indices, weights) for IDW from src to dst."""
     tree = cKDTree(src_xyz)
     dists, idxs = tree.query(dst_xyz, k=k)
     dists = dists.astype(np.float32)
 
-    # Handle exact matches (dist == 0)
     exact = dists[:, 0] == 0.0
-    dists[exact, :] = 1.0         # avoid division by zero
+    dists[exact, :] = 1.0
     w = 1.0 / dists ** power
     w[exact, :] = 0.0
-    w[exact, 0] = 1.0             # exact match → weight 1 on nearest neighbour
+    w[exact, 0] = 1.0
     w /= w.sum(axis=1, keepdims=True)
     return idxs, w
 
 
 def _apply_idw(values, indices, weights):
-    """
-    Apply precomputed IDW weights to interpolate values.
-
-    Parameters
-    ----------
-    values  : (N_src, C) float32
-    indices : (N_dst, k) int
-    weights : (N_dst, k) float32
-
-    Returns
-    -------
-    (N_dst, C) float32
-    """
-    # values[indices] → (N_dst, k, C)
+    """(N_dst, C) = IDW interpolation of (N_src, C) values."""
     return (values[indices] * weights[:, :, None]).sum(axis=1)
 
 
+# ---------------------------------------------------------------------------
+# NeuralOperator
+# ---------------------------------------------------------------------------
+
 class NeuralOperator:
     def __init__(self, cfg):
-        """
-        Parameters
-        ----------
-        cfg : dict  (from p["neural_operator"] in JSON config)
-        """
         model_dir = cfg.get(
             "model_dir",
             os.path.expanduser("~/ShapeOperatorLearning"),
@@ -118,116 +132,177 @@ class NeuralOperator:
         ShearStressNN = getattr(model_module, "ShearStressNN")
 
         branch_dims = list(cfg["branch_dims"])
-        self.mode = cfg.get("mode", branch_dims[0] // 3)
+        self.mode   = cfg.get("mode", branch_dims[0] // 3)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # --- SVD basis (Ux, Uy, Uz): project displacement → coefficients ---
-        # Basis lives in the cylinder template space (N_template, mode)
-        basis = np.load(os.path.expanduser(cfg["svd_basis_file"]))
-        self.Ux = basis["Ux"][:, :self.mode].astype(np.float32)
-        self.Uy = basis["Uy"][:, :self.mode].astype(np.float32)
-        self.Uz = basis["Uz"][:, :self.mode].astype(np.float32)
+        # SVD basis — lives in cylinder template space (N_cyl, mode)
+        basis    = np.load(os.path.expanduser(cfg["svd_basis_file"]))
+        self.Ux  = basis["Ux"][:, :self.mode].astype(np.float32)
+        self.Uy  = basis["Uy"][:, :self.mode].astype(np.float32)
+        self.Uz  = basis["Uz"][:, :self.mode].astype(np.float32)
 
-        # --- SVD template nodes (cylinder.vtk): IDW target for displacement projection ---
-        self.svd_template_xyz = _load_vtk_points(cfg["svd_template_vtk"])  # (N_template, 3)
+        # Cylinder template node positions (N_cyl, 3) — reference for SVD and pull-back
+        self._source_vtk_path = os.path.expanduser(cfg["svd_template_vtk"])
+        self.cyl_xyz = _load_vtk_points(self._source_vtk_path)
 
-        # --- Trunk evaluation grid (sample_00001/1-shoot-16.vtk) ---
-        # Must match ref_xyz_vtk_path used during training — this is the fixed
-        # collocation grid fed as trunk input to the NN.
-        self.trunk_xyz = _load_vtk_points(cfg["trunk_xyz_vtk"])  # (N_trunk, 3)
+        # LDDMM / MATLAB settings
+        self.matlab_exe      = cfg.get("matlab_exe", "/home/shiyi/matlab/bin/matlab")
+        self.lddmm_script_dir = os.path.expanduser(
+            cfg.get("lddmm_script_dir", "~/TAA_CFD_pipeline")
+        )
+        self.work_dir        = os.path.expanduser(cfg.get("work_dir", "~/fsg_no_work"))
+        self.matlab_timeout  = cfg.get("matlab_timeout", 600)
+        os.makedirs(self.work_dir, exist_ok=True)
 
-        # IDW hyper-parameters
+        # IDW parameters
         self.idw_k     = cfg.get("idw_k", 8)
         self.idw_power = cfg.get("idw_power", 2.0)
 
-        # Precomputed IDW weight tables (built on first call; cached thereafter).
-        # Three transfers needed:
-        #   solid → svd_template  (to project displacement onto SVD basis)
-        #   solid → trunk         (not needed; trunk is fixed)
-        #   trunk → solid         (to map WSS back to solid interface)
-        self._disp_idx = None   # solid → svd_template
-        self._disp_w   = None
-        self._wss_idx  = None   # trunk → solid
-        self._wss_w    = None
-
-        # --- Load trained model ---
+        # Trained model
         model = ShearStressNN(
             branch_dims=branch_dims,
             trunk_dims=list(cfg["trunk_dims"]),
             final_dim=cfg.get("final_dim", 64),
         )
-        ckpt = torch.load(
-            os.path.expanduser(cfg["pt_file"]),
-            map_location="cpu",
-        )
-        state = {k.replace("module.", ""): v
-                 for k, v in ckpt["model_state_dict"].items()}
+        ckpt  = torch.load(os.path.expanduser(cfg["pt_file"]), map_location="cpu")
+        state = {k.replace("module.", ""): v for k, v in ckpt["model_state_dict"].items()}
         model.load_state_dict(state)
         model.to(self.device)
         model.eval()
         self.model = model
 
-        print(f"[NeuralOperator] model loaded from {cfg['pt_file']}")
-        print(f"[NeuralOperator] SVD template: {len(self.svd_template_xyz)} nodes, "
-              f"trunk grid: {len(self.trunk_xyz)} nodes, modes: {self.mode}")
+        print(f"[NeuralOperator] model: {cfg['pt_file']}")
+        print(f"[NeuralOperator] cylinder template: {len(self.cyl_xyz)} nodes, modes: {self.mode}")
+        print(f"[NeuralOperator] MATLAB: {self.matlab_exe}")
+        print(f"[NeuralOperator] work dir: {self.work_dir}")
 
-    def _ensure_idw(self, solid_xyz):
-        """Build IDW tables the first time we see the solid mesh layout."""
-        if self._disp_idx is not None:
-            return
-        solid_xyz = solid_xyz.astype(np.float32)
-        # solid → SVD template nodes (for displacement projection)
-        self._disp_idx, self._disp_w = _idw_weights(
-            solid_xyz, self.svd_template_xyz, self.idw_k, self.idw_power)
-        # trunk nodes → solid (for WSS back-transfer)
-        self._wss_idx, self._wss_w = _idw_weights(
-            self.trunk_xyz, solid_xyz, self.idw_k, self.idw_power)
-        print(f"[NeuralOperator] IDW tables built: solid={len(solid_xyz)} nodes, "
-              f"svd_template={len(self.svd_template_xyz)}, trunk={len(self.trunk_xyz)}")
+    # ------------------------------------------------------------------
+    # LDDMM
+    # ------------------------------------------------------------------
 
-    def predict_wss(self, solid_disp, solid_xyz):
+    def _run_lddmm(self, target_vtk, output_dir):
         """
-        Predict WSS at solid interface nodes.
+        Call MATLAB to register cylinder → target_vtk.
+        Returns shoot16_pts (N_cyl, 3): deformed positions of cylinder nodes.
+        """
+        source_vtk = self._source_vtk_path
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        cmd = [
+            self.matlab_exe,
+            "-sd", self.lddmm_script_dir,
+            "-batch",
+            (f"lddmm_register_single("
+             f"'{source_vtk}', "
+             f"'{target_vtk}', "
+             f"'{output_dir}')")
+        ]
+        print(f"[NeuralOperator] running LDDMM ...")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self.matlab_timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"MATLAB LDDMM failed (exit {result.returncode}):\n"
+                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+
+        shoot_vtk = os.path.join(output_dir, "1-shoot-16.vtk")
+        if not os.path.exists(shoot_vtk):
+            raise FileNotFoundError(
+                f"LDDMM output not found: {shoot_vtk}\n"
+                f"MATLAB stdout:\n{result.stdout}"
+            )
+
+        return _load_vtk_points(shoot_vtk)   # (N_cyl, 3)
+
+    # ------------------------------------------------------------------
+    # Pull-back
+    # ------------------------------------------------------------------
+
+    def _pull_back(self, solid_xyz, shoot16_pts):
+        """
+        Pull solid FEM interface nodes from current (physical) space back to
+        cylinder reference space.
+
+        LDDMM gives a particle correspondence: cyl_xyz[i] ↔ shoot16_pts[i].
+        For each solid FEM node (in physical space), find k nearest shoot16 nodes,
+        then IDW-interpolate the corresponding cylinder positions.
 
         Parameters
         ----------
-        solid_disp : np.ndarray (N_solid, 3)
-            Displacement of solid interface nodes from reference configuration.
-        solid_xyz  : np.ndarray (N_solid, 3)
-            Reference positions of solid interface nodes.
+        solid_xyz   : (N_solid, 3) solid FEM reference positions (physical)
+        shoot16_pts : (N_cyl, 3)  deformed cylinder node positions (physical)
 
         Returns
         -------
-        wss_solid : np.ndarray (N_solid, 3)
-            Predicted WSS at solid interface nodes.
+        (N_solid, 3) solid FEM nodes pulled back to cylinder reference space
+        """
+        idxs, weights = _idw_weights(
+            shoot16_pts, solid_xyz, self.idw_k, self.idw_power
+        )
+        return _apply_idw(self.cyl_xyz, idxs, weights)
+
+    # ------------------------------------------------------------------
+    # Main inference entry point
+    # ------------------------------------------------------------------
+
+    def predict_wss(self, solid_disp, solid_xyz, solid_mesh, call_id=0):
+        """
+        Predict WSS at solid interface nodes via LDDMM registration + NN.
+
+        Parameters
+        ----------
+        solid_disp : (N_solid, 3) displacement of solid interface nodes
+        solid_xyz  : (N_solid, 3) reference positions of solid interface nodes
+        solid_mesh : vtkPolyData  solid interface mesh (for surface connectivity)
+        call_id    : int          iteration counter (used to name temp files)
+
+        Returns
+        -------
+        wss : (N_solid, 3)
         """
         solid_disp = np.asarray(solid_disp, dtype=np.float32)
         solid_xyz  = np.asarray(solid_xyz,  dtype=np.float32)
 
-        # Lazily build IDW weight tables
-        self._ensure_idw(solid_xyz)
+        # 1. Current surface positions
+        current_xyz = solid_xyz + solid_disp
 
-        # 1. Interpolate displacement: solid nodes → SVD template nodes
-        disp_template = _apply_idw(solid_disp, self._disp_idx, self._disp_w)
+        # 2. Write current surface as VTK
+        target_vtk = os.path.join(self.work_dir, f"target_{call_id}.vtk")
+        output_dir  = os.path.join(self.work_dir, f"lddmm_{call_id}")
+        _write_surface_vtk(solid_mesh, current_xyz, target_vtk)
 
-        # 2. Project onto SVD basis → geometry coefficients
-        coeff_x = self.Ux.T @ disp_template[:, 0]   # (mode,)
-        coeff_y = self.Uy.T @ disp_template[:, 1]
-        coeff_z = self.Uz.T @ disp_template[:, 2]
-        coeffs  = np.concatenate([coeff_x, coeff_y, coeff_z]).astype(np.float32)
+        # 3. Run LDDMM
+        shoot16_pts = self._run_lddmm(target_vtk, output_dir)   # (N_cyl, 3)
 
-        # 3. NN forward pass at fixed trunk collocation grid → WSS
-        n_pts    = len(self.trunk_xyz)
+        # 4. LDDMM displacement at cylinder nodes → SVD coefficients
+        disp_cyl = shoot16_pts - self.cyl_xyz                   # (N_cyl, 3)
+        coeff_x  = self.Ux.T @ disp_cyl[:, 0]                  # (mode,)
+        coeff_y  = self.Uy.T @ disp_cyl[:, 1]
+        coeff_z  = self.Uz.T @ disp_cyl[:, 2]
+        coeffs   = np.concatenate([coeff_x, coeff_y, coeff_z]).astype(np.float32)
+
+        # 5. Pull back solid FEM nodes to cylinder reference space
+        trunk_input = self._pull_back(solid_xyz, shoot16_pts)   # (N_solid, 3)
+
+        # 6. NN forward pass — trunk = pulled-back FEM positions
+        n_pts    = len(trunk_input)
         coeffs_t = torch.from_numpy(np.tile(coeffs, (n_pts, 1))).to(self.device)
-        xyz_t    = torch.from_numpy(self.trunk_xyz).to(self.device)
+        xyz_t    = torch.from_numpy(trunk_input).to(self.device)
 
         preds = []
         with torch.no_grad():
             for start in range(0, n_pts, 1000):
-                out = self.model(coeffs_t[start:start+1000],
-                                 xyz_t[start:start+1000])
+                out = self.model(
+                    coeffs_t[start:start+1000],
+                    xyz_t[start:start+1000],
+                )
                 preds.append(out.cpu())
-        wss_trunk = torch.cat(preds).numpy().astype(np.float32)  # (N_trunk, 3)
 
-        # 4. Interpolate WSS: trunk nodes → solid interface nodes
-        return _apply_idw(wss_trunk, self._wss_idx, self._wss_w)  # (N_solid, 3)
+        # WSS is returned directly at solid FEM node positions (no back-mapping)
+        return torch.cat(preds).numpy().astype(np.float32)  # (N_solid, 3)
