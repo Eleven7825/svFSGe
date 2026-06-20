@@ -15,17 +15,25 @@ The LDDMM reference geometry and SVD basis are precomputed by:
   TAA_CFD_pipeline/vtk/cylinder.vtk         (ref_xyz_vtk_path)
 
 Config keys (all under "neural_operator" in the JSON):
-  enabled         – bool, set true to activate
-  pt_file         – path to shear_stress_model.pt
-  svd_basis_file  – path to *_basis.npz (Ux, Uy, Uz)
-  ref_xyz_vtk_path – path to cylinder.vtk (LDDMM template, 672 nodes)
-  branch_dims     – list[int]
-  trunk_dims      – list[int]
-  final_dim       – int
-  mode            – int, SVD modes (default = branch_dims[0] // 3)
-  idw_k           – int, IDW nearest neighbours (default 8)
-  idw_power       – float, IDW power (default 2)
-  model_dir       – path to ShapeOperatorLearning (optional)
+  enabled              – bool, set true to activate
+  pt_file              – path to shear_stress_model.pt
+  svd_basis_file       – path to *_basis.npz (Ux, Uy, Uz)
+  svd_template_vtk     – path to cylinder.vtk (LDDMM template used to compute SVD basis)
+  trunk_xyz_vtk        – path to sample_00001/1-shoot-16.vtk (fixed evaluation grid,
+                         must match the ref_xyz_vtk_path used during training)
+  branch_dims          – list[int]
+  trunk_dims           – list[int]
+  final_dim            – int
+  mode                 – int, SVD modes (default = branch_dims[0] // 3)
+  idw_k                – int, IDW nearest neighbours (default 8)
+  idw_power            – float, IDW power (default 2)
+  model_dir            – path to ShapeOperatorLearning (optional)
+
+Two distinct 672-node grids:
+  svd_template_vtk  – cylinder.vtk: used ONLY for projecting solid displacement
+                      onto SVD basis (same nodes the basis was computed on)
+  trunk_xyz_vtk     – 1-shoot-16.vtk of sample_00001: fixed collocation points
+                      fed as trunk input to the NN (must match training)
 """
 
 import os
@@ -113,25 +121,34 @@ class NeuralOperator:
         self.mode = cfg.get("mode", branch_dims[0] // 3)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # --- SVD basis (Ux, Uy, Uz): needed to project displacement → coefficients ---
+        # --- SVD basis (Ux, Uy, Uz): project displacement → coefficients ---
+        # Basis lives in the cylinder template space (N_template, mode)
         basis = np.load(os.path.expanduser(cfg["svd_basis_file"]))
-        self.Ux = basis["Ux"][:, :self.mode].astype(np.float32)   # (N_lddmm, mode)
+        self.Ux = basis["Ux"][:, :self.mode].astype(np.float32)
         self.Uy = basis["Uy"][:, :self.mode].astype(np.float32)
         self.Uz = basis["Uz"][:, :self.mode].astype(np.float32)
 
-        # --- LDDMM reference node positions (cylinder template) ---
-        self.ref_xyz = _load_vtk_points(cfg["ref_xyz_vtk_path"])  # (N_lddmm, 3)
+        # --- SVD template nodes (cylinder.vtk): IDW target for displacement projection ---
+        self.svd_template_xyz = _load_vtk_points(cfg["svd_template_vtk"])  # (N_template, 3)
+
+        # --- Trunk evaluation grid (sample_00001/1-shoot-16.vtk) ---
+        # Must match ref_xyz_vtk_path used during training — this is the fixed
+        # collocation grid fed as trunk input to the NN.
+        self.trunk_xyz = _load_vtk_points(cfg["trunk_xyz_vtk"])  # (N_trunk, 3)
 
         # IDW hyper-parameters
         self.idw_k     = cfg.get("idw_k", 8)
         self.idw_power = cfg.get("idw_power", 2.0)
 
-        # Precomputed IDW weight tables (computed on first call once we know the
-        # solid mesh layout; cached thereafter)
-        self._fwd_idx = None   # solid → LDDMM
-        self._fwd_w   = None
-        self._bwd_idx = None   # LDDMM → solid
-        self._bwd_w   = None
+        # Precomputed IDW weight tables (built on first call; cached thereafter).
+        # Three transfers needed:
+        #   solid → svd_template  (to project displacement onto SVD basis)
+        #   solid → trunk         (not needed; trunk is fixed)
+        #   trunk → solid         (to map WSS back to solid interface)
+        self._disp_idx = None   # solid → svd_template
+        self._disp_w   = None
+        self._wss_idx  = None   # trunk → solid
+        self._wss_w    = None
 
         # --- Load trained model ---
         model = ShearStressNN(
@@ -151,19 +168,22 @@ class NeuralOperator:
         self.model = model
 
         print(f"[NeuralOperator] model loaded from {cfg['pt_file']}")
-        print(f"[NeuralOperator] LDDMM ref nodes: {len(self.ref_xyz)}, SVD modes: {self.mode}")
+        print(f"[NeuralOperator] SVD template: {len(self.svd_template_xyz)} nodes, "
+              f"trunk grid: {len(self.trunk_xyz)} nodes, modes: {self.mode}")
 
     def _ensure_idw(self, solid_xyz):
         """Build IDW tables the first time we see the solid mesh layout."""
-        if self._fwd_idx is not None:
+        if self._disp_idx is not None:
             return
         solid_xyz = solid_xyz.astype(np.float32)
-        self._fwd_idx, self._fwd_w = _idw_weights(
-            solid_xyz, self.ref_xyz, self.idw_k, self.idw_power)
-        self._bwd_idx, self._bwd_w = _idw_weights(
-            self.ref_xyz, solid_xyz, self.idw_k, self.idw_power)
-        print(f"[NeuralOperator] IDW tables built: "
-              f"solid={len(solid_xyz)} nodes → LDDMM={len(self.ref_xyz)} nodes")
+        # solid → SVD template nodes (for displacement projection)
+        self._disp_idx, self._disp_w = _idw_weights(
+            solid_xyz, self.svd_template_xyz, self.idw_k, self.idw_power)
+        # trunk nodes → solid (for WSS back-transfer)
+        self._wss_idx, self._wss_w = _idw_weights(
+            self.trunk_xyz, solid_xyz, self.idw_k, self.idw_power)
+        print(f"[NeuralOperator] IDW tables built: solid={len(solid_xyz)} nodes, "
+              f"svd_template={len(self.svd_template_xyz)}, trunk={len(self.trunk_xyz)}")
 
     def predict_wss(self, solid_disp, solid_xyz):
         """
@@ -187,19 +207,19 @@ class NeuralOperator:
         # Lazily build IDW weight tables
         self._ensure_idw(solid_xyz)
 
-        # 1. Interpolate displacement from solid mesh to LDDMM nodes
-        disp_lddmm = _apply_idw(solid_disp, self._fwd_idx, self._fwd_w)  # (N_lddmm, 3)
+        # 1. Interpolate displacement: solid nodes → SVD template nodes
+        disp_template = _apply_idw(solid_disp, self._disp_idx, self._disp_w)
 
         # 2. Project onto SVD basis → geometry coefficients
-        coeff_x = self.Ux.T @ disp_lddmm[:, 0]   # (mode,)
-        coeff_y = self.Uy.T @ disp_lddmm[:, 1]
-        coeff_z = self.Uz.T @ disp_lddmm[:, 2]
+        coeff_x = self.Ux.T @ disp_template[:, 0]   # (mode,)
+        coeff_y = self.Uy.T @ disp_template[:, 1]
+        coeff_z = self.Uz.T @ disp_template[:, 2]
         coeffs  = np.concatenate([coeff_x, coeff_y, coeff_z]).astype(np.float32)
 
-        # 3. NN forward pass at LDDMM ref nodes → WSS (N_lddmm, 3)
-        n_pts    = len(self.ref_xyz)
+        # 3. NN forward pass at fixed trunk collocation grid → WSS
+        n_pts    = len(self.trunk_xyz)
         coeffs_t = torch.from_numpy(np.tile(coeffs, (n_pts, 1))).to(self.device)
-        xyz_t    = torch.from_numpy(self.ref_xyz).to(self.device)
+        xyz_t    = torch.from_numpy(self.trunk_xyz).to(self.device)
 
         preds = []
         with torch.no_grad():
@@ -207,7 +227,7 @@ class NeuralOperator:
                 out = self.model(coeffs_t[start:start+1000],
                                  xyz_t[start:start+1000])
                 preds.append(out.cpu())
-        wss_lddmm = torch.cat(preds).numpy().astype(np.float32)  # (N_lddmm, 3)
+        wss_trunk = torch.cat(preds).numpy().astype(np.float32)  # (N_trunk, 3)
 
-        # 4. Interpolate WSS from LDDMM nodes back to solid interface nodes
-        return _apply_idw(wss_lddmm, self._bwd_idx, self._bwd_w)  # (N_solid, 3)
+        # 4. Interpolate WSS: trunk nodes → solid interface nodes
+        return _apply_idw(wss_trunk, self._wss_idx, self._wss_w)  # (N_solid, 3)
