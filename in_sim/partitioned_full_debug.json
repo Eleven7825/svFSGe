@@ -31,7 +31,7 @@
         "iqn_ils_debug": true,
         "iqn_ils_reset": false
     },
-    "nmax": 10,
+    "nloads": 10,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {

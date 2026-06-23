@@ -41,7 +41,7 @@
         "iqn_ils_q": 20,
         "iqn_ils_eps": 1.0e-1
     },
-    "nmax": 20,
+    "nloads": 20,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {

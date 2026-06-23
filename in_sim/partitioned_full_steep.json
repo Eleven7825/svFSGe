@@ -31,7 +31,7 @@
         "iqn_ils_debug": true,
         "iqn_ils_reset": true
     },
-    "nmax": 5,
+    "nloads": 5,
     "fmax": 1.0,
     "predict_file": false,
     "profile_beta": true,

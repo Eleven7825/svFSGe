@@ -228,7 +228,7 @@ class FSG(svFSI):
 
         # loop load steps
         i = i_start
-        for t in range(t_start, self.p["nmax"] + 1):
+        for t in range(t_start, self.p["nloads"] + 1):
             print(
                 "=" * 30
                 + " t "

@@ -29,8 +29,12 @@
         "iqn_ils_q": 20,
         "iqn_ils_eps": 1.0e-1
     },
-    "nmax": 2,
+    "nloads": 2,
     "fmax": 1.0,
+    "gr_load": {
+        "profile": "tanh",
+        "steep": 2.0
+    },
     "predict_file": false,
     "exe": {
         "fluid": "/svfsi/svFSI-build/bin/svFSI",

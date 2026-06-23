@@ -47,6 +47,12 @@ class svFSI(Simulation):
         # simulation parameters
         Simulation.__init__(self, f_params)
 
+        # number of G&R load steps. Renamed nmax -> nloads (the JSON already has
+        # a coup["nmax"] for coupling iterations, so the top-level name was
+        # confusing). Accept the old "nmax" for backward compatibility.
+        if "nloads" not in self.p and "nmax" in self.p:
+            self.p["nloads"] = self.p["nmax"]
+
         # time stamp
         ct = str(datetime.datetime.now()).replace(" ", "_").replace(":", "-")
 
@@ -141,7 +147,7 @@ class svFSI(Simulation):
         self.prev = Solution(self)
 
         # generate load vector
-        self.p_vec = np.linspace(1.0, self.p["fmax"], self.p["nmax"] + 1)
+        self.p_vec = np.linspace(1.0, self.p["fmax"], self.p["nloads"] + 1)
 
         # relaxation parameter
         self.p["coup"]["omega"] = defaultdict(list)
@@ -183,6 +189,82 @@ class svFSI(Simulation):
         if os.path.isdir(in_geo_src):
             shutil.copytree(in_geo_src, join(self.p["f_out"], "in_geo"))
 
+        # inject the G&R load profile from the JSON into the solid XML
+        self.set_gr_load()
+
+    def set_gr_load(self):
+        """Inject the G&R load profile from the JSON into the solid solver XML.
+
+        The load profile controls how the G&R insult is ramped over pseudo-time
+        inside gr_equilibrated.cpp. Previously this was a hard-coded tanh ramp;
+        now it is exposed through the GR_equilibrated material parameters
+        <load_profile>, <load_steep> and <load_file>, so it can be changed from
+        the JSON without editing/rebuilding svFSI. Configure via an optional
+        "gr_load" section:
+
+            "gr_load": {
+                "profile": "tanh",         # linear | tanh | power | file
+                "steep": 2.0,              # tanh steepness / power exponent
+                "curve": [[0, 0.0],        # only for profile == "file":
+                          [1, 0.33],       #   one [step, factor] per load step,
+                          [2, 0.67],       #   x = step number (0 = pre-stress,
+                          [3, 1.00]]       #   1..nloads = G&R loads), so the
+            }                              #   curve has nloads + 1 entries.
+
+        For profile "file" the curve gives the load factor directly per step
+        (no normalization/interpolation between steps), so the number of entries
+        equals the number of load steps. Omitting "gr_load" leaves the XML
+        untouched, so svFSI falls back to its defaults (tanh, steep=2.0) which
+        reproduce the historical ramp.
+        """
+        cfg = self.p.get("gr_load")
+        if cfg is None:
+            return
+
+        profile = cfg.get("profile", "tanh")
+        steep = cfg.get("steep", 2.0)
+        load_file = cfg.get("file", "")
+
+        # write a tabulated load curve when requested. Each row is "x y" with
+        # x the integer load-step number (0 = pre-stress, 1..nloads = G&R loads)
+        # and y the load factor at that step. A plain list of factors is also
+        # accepted (step numbers are then taken as 0, 1, 2, ...).
+        if profile == "file" and "curve" in cfg:
+            curve = cfg["curve"]
+            load_file = join("in_svfsi", "gr_load_curve.dat")
+            with open(join(self.p["f_out"], load_file), "w") as f:
+                for i, row in enumerate(curve):
+                    x, y = (i, row) if np.isscalar(row) else (row[0], row[1])
+                    f.write(str(x) + " " + str(y) + "\n")
+
+        # tags to write into the GR_equilibrated material block
+        tags = {"load_profile": profile, "load_steep": steep}
+        if load_file:
+            tags["load_file"] = load_file
+
+        # patch the solid solver XML (only the GR_equilibrated material reads these)
+        xml_file = join(self.p["f_out"], "in_svfsi", self.p["inp"]["solid"])
+        with open(xml_file) as f:
+            xml = f.read()
+
+        for tag, val in tags.items():
+            new = "<" + tag + "> " + str(val) + " </" + tag + ">"
+            pat = re.compile(r"<%s>.*?</%s>" % (tag, tag))
+            if pat.search(xml):
+                # override an existing tag
+                xml = pat.sub(new, xml)
+            else:
+                # insert right after <coup_wss>, reusing its indentation
+                xml = re.sub(
+                    r"(\n([ \t]*)<coup_wss>.*?</coup_wss>)",
+                    r"\1\n\g<2>" + new,
+                    xml,
+                    count=1,
+                )
+
+        with open(xml_file, "w") as f:
+            f.write(xml)
+
     def set_defaults(self):
         pass
 
@@ -216,7 +298,7 @@ class svFSI(Simulation):
             q = q0 * np.min([i * self.p["fluid"]["q0_rate"] / q0, 1.0])
         else:
             if "q1" in self.p["fluid"]:
-                f_time = t / self.p["nmax"]
+                f_time = t / self.p["nloads"]
                 q1 = deepcopy(self.p["fluid"]["q1"] / self.mesh_p["n_seg"])
                 q = q0 * (1.0 - f_time) + q1 * f_time
             else:
@@ -245,7 +327,7 @@ class svFSI(Simulation):
         # define angle (in degrees)
         alpha0 = 0
         alphan = 0
-        f_time = t / self.p["nmax"]
+        f_time = t / self.p["nloads"]
         alpha = (alpha0 * (1 - f_time) + alphan * f_time) * np.pi / 180.0
 
         # set bc flow vector
@@ -742,7 +824,7 @@ class svFSI(Simulation):
         u_profile = 2.0 * (1.0 - rad_norm**2.0)
 
         # time factor
-        f_time = t / self.p["nmax"]
+        f_time = t / self.p["nloads"]
 
         # custom flow profile
         if "profile_beta" in self.p:
