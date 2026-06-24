@@ -189,8 +189,43 @@ class svFSI(Simulation):
         if os.path.isdir(in_geo_src):
             shutil.copytree(in_geo_src, join(self.p["f_out"], "in_geo"))
 
-        # inject the G&R load profile from the JSON into the solid XML
+        # inject the G&R load profile and insult profile from the JSON into the
+        # solid XML
         self.set_gr_load()
+        self.set_gr_insult()
+
+    def _write_curve(self, rel_path, curve):
+        """Write a 2-column tabulated curve to <f_out>/<rel_path>. Each row is
+        "x y"; the curve may be a list of [x, y] pairs or a plain list of y
+        values (x is then taken as 0, 1, 2, ...)."""
+        with open(join(self.p["f_out"], rel_path), "w") as f:
+            for i, row in enumerate(curve):
+                x, y = (i, row) if np.isscalar(row) else (row[0], row[1])
+                f.write(str(x) + " " + str(y) + "\n")
+
+    def _patch_solid_xml(self, tags):
+        """Set/insert <tag> elements in the GR_equilibrated material block of the
+        solid solver XML (each run owns a private copy). Existing tags are
+        overridden in place; new tags are inserted right after <coup_wss>,
+        reusing its indentation. Same regex-on-XML approach as the pulsatile
+        step-count patch."""
+        xml_file = join(self.p["f_out"], "in_svfsi", self.p["inp"]["solid"])
+        with open(xml_file) as f:
+            xml = f.read()
+        for tag, val in tags.items():
+            new = "<" + tag + "> " + str(val) + " </" + tag + ">"
+            pat = re.compile(r"<%s>.*?</%s>" % (tag, tag))
+            if pat.search(xml):
+                xml = pat.sub(new, xml)
+            else:
+                xml = re.sub(
+                    r"(\n([ \t]*)<coup_wss>.*?</coup_wss>)",
+                    r"\1\n\g<2>" + new,
+                    xml,
+                    count=1,
+                )
+        with open(xml_file, "w") as f:
+            f.write(xml)
 
     def set_gr_load(self):
         """Inject the G&R load profile from the JSON into the solid solver XML.
@@ -230,40 +265,71 @@ class svFSI(Simulation):
         # and y the load factor at that step. A plain list of factors is also
         # accepted (step numbers are then taken as 0, 1, 2, ...).
         if profile == "file" and "curve" in cfg:
-            curve = cfg["curve"]
             load_file = join("in_svfsi", "gr_load_curve.dat")
-            with open(join(self.p["f_out"], load_file), "w") as f:
-                for i, row in enumerate(curve):
-                    x, y = (i, row) if np.isscalar(row) else (row[0], row[1])
-                    f.write(str(x) + " " + str(y) + "\n")
+            self._write_curve(load_file, cfg["curve"])
 
         # tags to write into the GR_equilibrated material block
         tags = {"load_profile": profile, "load_steep": steep}
         if load_file:
             tags["load_file"] = load_file
+        self._patch_solid_xml(tags)
 
-        # patch the solid solver XML (only the GR_equilibrated material reads these)
-        xml_file = join(self.p["f_out"], "in_svfsi", self.p["inp"]["solid"])
-        with open(xml_file) as f:
-            xml = f.read()
+    def set_gr_insult(self):
+        """Inject the spatial G&R insult profile from the JSON into the solid XML.
 
-        for tag, val in tags.items():
-            new = "<" + tag + "> " + str(val) + " </" + tag + ">"
-            pat = re.compile(r"<%s>.*?</%s>" % (tag, tag))
-            if pat.search(xml):
-                # override an existing tag
-                xml = pat.sub(new, xml)
-            else:
-                # insert right after <coup_wss>, reusing its indentation
-                xml = re.sub(
-                    r"(\n([ \t]*)<coup_wss>.*?</coup_wss>)",
-                    r"\1\n\g<2>" + new,
-                    xml,
-                    count=1,
-                )
+        The insult profile localizes the aneurysm: the elastin/stimulus
+        knock-down at each point is scaled by an axial x azimuthal factor.
+        Previously this super-Gaussian shape was hard-coded in
+        gr_equilibrated.cpp; it is now exposed through the GR_equilibrated
+        material parameters, so it can be set from the JSON without rebuilding
+        svFSI. Configure via an optional "gr_insult" section:
 
-        with open(xml_file, "w") as f:
-            f.write(xml)
+            "gr_insult": {
+                "profile": "gaussian",   # gaussian (default) | file
+                "mag": 0.7,              # peak elastin loss fraction
+                "z_loc": 0.5,            # axial center / tube length
+                "z_wid": 0.25,           # axial width / tube length
+                "z_exp": 2,              # axial super-Gaussian exponent
+                "asym": true,            # apply circumferential localization
+                "theta_wid": 0.55,       # azimuthal width / pi
+                "theta_exp": 6,          # azimuthal super-Gaussian exponent
+                "curve": [[0.0, 0.0],    # only for profile == "file": the axial
+                          [0.5, 1.0],    #   factor f_axi vs normalized axial
+                          [1.0, 0.0]]    #   position z/lo in [0, 1] (the azimuth
+            }                            #   factor stays gaussian)
+
+        For profile "file" the curve defines the axial insult shape (any
+        function); the azimuthal localization still follows the gaussian
+        asym/theta parameters. Omitting "gr_insult" leaves the XML untouched, so
+        svFSI falls back to its defaults, reproducing the historical insult.
+        """
+        cfg = self.p.get("gr_insult")
+        if cfg is None:
+            return
+
+        profile = cfg.get("profile", "gaussian")
+        insult_file = cfg.get("file", "")
+
+        # write the axial insult curve (z/lo, f_axi) for a custom shape
+        if profile == "file" and "curve" in cfg:
+            insult_file = join("in_svfsi", "gr_insult_curve.dat")
+            self._write_curve(insult_file, cfg["curve"])
+
+        # map JSON keys -> GR_equilibrated XML tags
+        keys = {
+            "mag": "insult_mag", "z_loc": "insult_z_loc", "z_wid": "insult_z_wid",
+            "z_exp": "insult_z_exp", "asym": "insult_asym",
+            "theta_wid": "insult_theta_wid", "theta_exp": "insult_theta_exp",
+        }
+        tags = {"insult_profile": profile}
+        for jkey, tag in keys.items():
+            if jkey in cfg:
+                val = cfg[jkey]
+                # svFSI parses booleans as true/false
+                tags[tag] = str(val).lower() if isinstance(val, bool) else val
+        if insult_file:
+            tags["insult_file"] = insult_file
+        self._patch_solid_xml(tags)
 
     def set_defaults(self):
         pass

@@ -35,6 +35,9 @@
         "profile": "tanh",
         "steep": 2.0
     },
+    "gr_insult": {
+        "profile": "gaussian"
+    },
     "predict_file": false,
     "exe": {
         "fluid": "/svfsi/svFSI-build/bin/svFSI",
