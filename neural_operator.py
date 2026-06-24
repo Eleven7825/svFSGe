@@ -228,11 +228,24 @@ class NeuralOperator:
         trunk_dims = list(cfg["trunk_dims"])
         final_dim  = cfg.get("final_dim", 64)
 
-        # WSS model (out_dim=3)
-        self.model = self._load_model(
-            ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=3,
-            pt_file=cfg["pt_file"],
-        )
+        # WSS model. The FSG coupling consumes only |WSS| (svfsi.py reduces the
+        # vector via np.linalg.norm), so a dedicated magnitude model (out_dim=1)
+        # is both the correct target and more accurate. If wss_magnitude_pt_file
+        # is given we use it and deliver the scalar as a vector with the
+        # magnitude in the axial component (downstream norm recovers it exactly).
+        self.wss_magnitude_pt = cfg.get("wss_magnitude_pt_file")
+        if self.wss_magnitude_pt:
+            self.model = self._load_model(
+                ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
+                pt_file=self.wss_magnitude_pt,
+            )
+            self.wss_is_magnitude = True
+        else:
+            self.model = self._load_model(
+                ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=3,
+                pt_file=cfg["pt_file"],
+            )
+            self.wss_is_magnitude = False
 
         # Pressure model (out_dim=1) — required: solid solver always needs interface pressure
         pressure_pt = cfg["pressure_pt_file"]
@@ -242,7 +255,10 @@ class NeuralOperator:
         )
         print(f"[NeuralOperator] pressure model: {pressure_pt}")
 
-        print(f"[NeuralOperator] WSS model: {cfg['pt_file']}")
+        if self.wss_is_magnitude:
+            print(f"[NeuralOperator] WSS model (magnitude, out_dim=1): {self.wss_magnitude_pt}")
+        else:
+            print(f"[NeuralOperator] WSS model (vector, out_dim=3): {cfg['pt_file']}")
         print(f"[NeuralOperator] cylinder template: {len(self.cyl_xyz)} nodes, modes: {self.mode}")
         print(f"[NeuralOperator] LDDMM backend: {self.lddmm_backend}")
         if self.lddmm_backend == "direct":
@@ -554,7 +570,16 @@ class NeuralOperator:
         coeffs_t = torch.from_numpy(np.tile(coeffs, (n_pts, 1))).to(self.device)
         xyz_t    = torch.from_numpy(np.asarray(trunk_input, dtype=np.float32)).to(self.device)
 
-        wss      = self._forward(self.model, coeffs_t, xyz_t)            # (N_solid, 3)
+        if self.wss_is_magnitude:
+            # model predicts the scalar |WSS|; deliver it as a vector with the
+            # magnitude in the axial (z) component so the downstream norm in the
+            # FSG coupling (svfsi.py) recovers |WSS| exactly. (Direction is
+            # discarded there; axial is the physically dominant component.)
+            mag = self._forward(self.model, coeffs_t, xyz_t).reshape(-1)     # (N_solid,)
+            wss = np.zeros((len(mag), 3), dtype=np.float32)
+            wss[:, 2] = mag
+        else:
+            wss  = self._forward(self.model, coeffs_t, xyz_t)               # (N_solid, 3)
         pressure = self._forward(self.pressure_model, coeffs_t, xyz_t).squeeze(-1)
         return wss, pressure
 
