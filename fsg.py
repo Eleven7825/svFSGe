@@ -11,6 +11,8 @@ from copy import deepcopy
 from collections import defaultdict
 import argparse
 
+import matplotlib
+matplotlib.use("Agg")  # headless — no display needed
 import matplotlib.pyplot as plt
 
 from vtk.util.numpy_support import vtk_to_numpy as v2n
@@ -19,6 +21,7 @@ from svfsi import svFSI, sv_names
 from post import main_arg
 
 from utilities import QRfiltering_mod
+from neural_operator import NeuralOperator
 
 
 class FSG(svFSI):
@@ -29,6 +32,14 @@ class FSG(svFSI):
     def __init__(self, f_params=None):
         # svFSI simulations
         svFSI.__init__(self, f_params)
+
+        # neural operator surrogate (replaces fluid + mesh per sub-iteration)
+        no_cfg = self.p.get("neural_operator", {})
+        if no_cfg.get("enabled") and "work_dir" not in no_cfg:
+            # Default work_dir inside this run's output dir so each FSG run
+            # keeps its own lddmm_N/ directories (no global /tmp path).
+            no_cfg = dict(no_cfg, work_dir=os.path.join(self.p["f_out"], "lddmm_work"))
+        self.no = NeuralOperator(no_cfg) if no_cfg.get("enabled") else None
 
     def run_post(self):
         # todo: read in automatically
@@ -263,6 +274,7 @@ class FSG(svFSI):
                 for name, s in self.curr.sol.items():
                     if s is None:
                         print(name + " simulation failed")
+                        self._save_failure_case(t, i)
                         return
 
                 # screen output
@@ -412,9 +424,124 @@ class FSG(svFSI):
             trg = os.path.join(self.p["f_arx"], os.path.basename(src))
             shutil.copyfile(src, trg)
 
+    def _save_failure_case(self, t, i):
+        """Save failure geometry to failed_cases/ so the oracle pipeline can process it."""
+        import json as _json
+        import sys as _sys
+        _sys.path.insert(0, "/home/shiyi/TAA_CFD_pipeline")
+        from generate_displacement import write_displacement_file
+
+        tag      = f"t{t:03d}_i{i:03d}_{int(time.time())}"
+        base_dir = self.p.get("failed_cases_dir",
+                              os.path.join(self.p["f_out"], "failed_cases"))
+        case_dir = os.path.join(base_dir, tag)
+        os.makedirs(case_dir, exist_ok=True)
+
+        # Solid solver failed so curr["solid","disp","int"] is None.
+        # Use the last successful displacement from self.prev instead.
+        try:
+            disp = self.curr.get(("solid", "disp", "int"))
+        except (ValueError, KeyError):
+            if not hasattr(self, "prev"):
+                print("  [failure] no previous state available — skipping geometry save")
+                return
+            disp = self.prev.get(("solid", "disp", "int"))   # (N, 3)
+        surf = self.mesh[("int", "solid")]                # vtkPolyData
+        ids  = v2n(surf.GetPointData().GetArray("GlobalNodeID")).astype(int)
+
+        write_displacement_file(
+            os.path.join(case_dir, "interface_displacement.dat"), ids, disp)
+        _json.dump({"t": t, "i": i, "tag": tag, "case_dir": case_dir},
+                   open(os.path.join(case_dir, "meta.json"), "w"), indent=2)
+        print(f"  [failure] geometry saved → {case_dir}")
+
+    def _wss_relax_beta(self, n):
+        """
+        WSS under-relaxation factor beta in [beta0, beta_max].
+
+        Aneurysm G&R is positive-feedback (bulge -> lower WSS -> more growth), so
+        the NN's WSS error can run the growth away into element inversion
+        (gr_equilibrated "Negative Jacobian") in the early sub-iterations of a
+        load step.  We damp the WSS *deviation* from the homeostatic baseline at
+        the start of each step (beta = beta0) and ramp beta up toward beta_max.
+
+        Config (under "coup"):
+          wss_relax       beta0, the start-of-step floor (default 1.0 = no damping)
+          wss_relax_max   beta_max, the cap (default 1.0)
+          wss_ramp_mode   "residual" (ramp keyed to coupling residual) or
+                          "subiter"  (ramp keyed to sub-iteration index n).
+                          "subiter" avoids the residual->beta->residual feedback
+                          that limit-cycles when beta_max == 1.
+          wss_relax_full  (residual mode) residual at/below which beta = beta_max
+                          (default 1e-2)
+          wss_ramp_iters  (subiter mode) n over which beta0 -> beta_max (default 10)
+          wss_ramp_profile ramp shape: "linear" | "quad" | "sqrt" | "exp"
+                          (default "linear")
+        """
+        c = self.p["coup"]
+        beta0    = c.get("wss_relax", 1.0)
+        if beta0 >= 1.0:
+            return 1.0
+        beta_max = c.get("wss_relax_max", 1.0)
+        mode     = c.get("wss_ramp_mode", "residual")
+
+        def shape(x):
+            x = float(np.clip(x, 0.0, 1.0))
+            prof = c.get("wss_ramp_profile", "linear")
+            if prof == "quad":   return x * x          # stay damped longer
+            if prof == "sqrt":   return np.sqrt(x)     # rise fast
+            if prof == "exp":    return 1.0 - np.exp(-3.0 * x)
+            return x                                   # linear
+
+        if mode == "subiter":
+            # beta depends only on the sub-iteration index -> no residual feedback
+            N = max(int(c.get("wss_ramp_iters", 10)), 1)
+            return beta0 + (beta_max - beta0) * shape(n / N)
+
+        # residual mode: ramp as the coupling residual falls 1 -> wss_relax_full
+        res = None
+        if n > 0:
+            cands = [e[-1][-1] for e in self.err.values() if e and e[-1]]
+            if cands:
+                res = max(cands)            # slowest field governs damping
+        if res is None or res >= 1.0:
+            return beta0
+        res_full = c.get("wss_relax_full", 1e-2)
+        if res <= res_full:
+            return beta_max
+        frac = np.log10(res) / np.log10(res_full)   # res=1 -> 0, res=res_full -> 1
+        return beta0 + (beta_max - beta0) * shape(frac)
+
+    def _neural_operator_step(self, times, i, t, n=0):
+        """Replace mesh + fluid: LDDMM registration → pull-back → NN → WSS + pressure."""
+        disp       = self.curr.get(("solid", "disp", "int"))  # (N_solid, 3)
+        solid_xyz  = self.points[("int", "solid")]             # (N_solid, 3) reference
+        solid_mesh = self.mesh[("int", "solid")]               # vtkPolyData connectivity
+        wss, pressure = self.no.predict_wss_and_pressure(disp, solid_xyz, solid_mesh, call_id=i)
+
+        # Residual-ramped growth under-relaxation (see _wss_relax_beta).
+        beta = self._wss_relax_beta(n)
+        if beta < 1.0:
+            if not hasattr(self, "_wss_homeo"):
+                zero = np.zeros_like(disp)
+                self._wss_homeo, _ = self.no.predict_wss_and_pressure(
+                    zero, solid_xyz, solid_mesh, call_id=-1)
+            wss = self._wss_homeo + beta * (wss - self._wss_homeo)
+
+        # NN predicts gauge pressure (CFD with zero outlet BC).
+        # Add the absolute outlet pressure baseline p0 * p_vec[t] to match Poiseuille convention.
+        p0 = self.p["fluid"]["p0"] * self.p_vec[t]
+        pressure = pressure + p0
+        self.curr.add(("fluid", "wss", "int"), wss)
+        self.curr.add(("solid", "press", "int"), pressure)
+        times["mesh"] = 0.0
+        times["fluid"] = 0.0
+
     def coup_step_iqn_ils(self, i, t, n, times):
-        # step 0: mesh movement (not in first first iteration)
-        if self.p["fsi"] and i > 1:
+        # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
+        if self.no is not None:
+            self._neural_operator_step(times, i, t, n)
+        elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
         else:
@@ -423,12 +550,13 @@ class FSG(svFSI):
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        # step 1: fluid update (skipped when neural operator is active)
+        if self.no is None:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
@@ -520,20 +648,23 @@ class FSG(svFSI):
             return True
 
     def coup_step_relax(self, i, t, n, times):
-        # step 0: mesh movement (not in very first iteration)
-        if self.p["fsi"] and i > 1:
+        # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
+        if self.no is not None:
+            self._neural_operator_step(times, i, t, n)
+        elif self.p["fsi"] and i > 1:
             if self.step("mesh", i, t, n, times):
                 return False
 
         # store previous solutions
         self.prev = self.curr.copy()
 
-        # step 1: fluid update
-        if self.p["fsi"]:
-            if self.step("fluid", i, t, n, times):
-                return False
-        else:
-            self.poiseuille(t)
+        # step 1: fluid update (skipped when neural operator is active)
+        if self.no is None:
+            if self.p["fsi"]:
+                if self.step("fluid", i, t, n, times):
+                    return False
+            else:
+                self.poiseuille(t)
 
         # step 2: solid update
         if self.step("solid", i, t, n, times):
@@ -594,10 +725,14 @@ class FSG(svFSI):
         if n_sol == 1:
             return vec_m0
 
-        # linearly extrapolate from previous load increment
+        # extrapolate from previous load increment, damped by predictor_relax.
+        # alpha=1 -> standard linear extrapolation (2*m0 - m1); alpha=0 -> constant
+        # (m0, no overshoot). Aggressive extrapolation overshoots into element
+        # inversion (gr_equilibrated "Negative Jacobian") for the nonlinear,
+        # NN-driven aneurysm growth at higher load steps, so allow damping.
         vec_m1 = self.converged[-2].get(kind)
-        # if n_sol == 2:
-        return 2.0 * vec_m0 - vec_m1
+        alpha = self.p["coup"].get("predictor_relax", 1.0)
+        return vec_m0 + alpha * (vec_m0 - vec_m1)
 
         # quadratically extrapolate from previous two load increments
         # vec_m2 = self.converged[-3].get(kind)
