@@ -9,6 +9,8 @@ import json
 import scipy
 import xmltodict
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 
 from matplotlib.ticker import StrMethodFormatter
@@ -576,7 +578,7 @@ def plot_single(data, coords, param, out, study, quant, locations, time=-1):
     plt.tight_layout()
     fname += time_str + ".pdf"
     fig.savefig(os.path.join(out, fname), bbox_inches="tight")
-    plt.cla()
+    plt.close(fig)
     print(fname)
 
 
@@ -858,7 +860,7 @@ def main_convergence(folder):
 
     plt.tight_layout()
     fig.savefig(os.path.join(out, "convergence.pdf"), bbox_inches="tight")
-    plt.cla()
+    plt.close(fig)
 
 
 if __name__ == "__main__":

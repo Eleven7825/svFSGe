@@ -191,6 +191,42 @@ class svFSI(Simulation):
 
         # inject the G&R load profile from the JSON into the solid XML
         self.set_gr_load()
+        self.set_gr_growth()
+
+    def _patch_gr_tags(self, tags):
+        """Set/override <tag> elements in the GR_equilibrated block of the solid
+        solver XML (per-run copy); insert new ones right after <coup_wss>."""
+        xml_file = join(self.p["f_out"], "in_svfsi", self.p["inp"]["solid"])
+        with open(xml_file) as f:
+            xml = f.read()
+        for tag, val in tags.items():
+            new = "<" + tag + "> " + str(val) + " </" + tag + ">"
+            pat = re.compile(r"<%s>.*?</%s>" % (tag, tag))
+            if pat.search(xml):
+                xml = pat.sub(new, xml)
+            else:
+                xml = re.sub(
+                    r"(\n([ \t]*)<coup_wss>.*?</coup_wss>)",
+                    r"\1\n\g<2>" + new, xml, count=1,
+                )
+        with open(xml_file, "w") as f:
+            f.write(xml)
+
+    def set_gr_growth(self):
+        """Inject optional G&R growth-stabilization params into the solid XML.
+
+        Currently exposes <tau_ratio_floor> (config key "tau_ratio_floor"): a
+        lower clamp on the WSS-stimulus ratio tau/tauo in gr_equilibrated.cpp.
+        A developed aneurysm bulge has collapsed luminal WSS (recirculation); an
+        accurate WSS surrogate then drives tau/tauo -> 0, saturating the growth
+        stimulus into runaway growth the partitioned coupling cannot integrate.
+        A positive floor caps that. Omitting the key leaves the XML untouched
+        (svFSI default 0 = disabled = historical behavior).
+        """
+        floor = self.p.get("tau_ratio_floor")
+        if floor is None:
+            return
+        self._patch_gr_tags({"tau_ratio_floor": floor})
 
     def set_gr_load(self):
         """Inject the G&R load profile from the JSON into the solid solver XML.

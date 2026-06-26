@@ -64,24 +64,35 @@ jobs:
 
               echo ""
               echo "================================"
-              echo "Running FSGe test (nmax=2)..."
+              echo "Running FSGe test 1/2: standard FSI (nmax=2)..."
               echo "================================"
               cd /svFSGe
               python3 ./fsg.py in_sim/partitioned_test.json 2>&1 | tee /svFSGe/test_output/test_run.log
 
-              echo ""
-              echo "================================"
-              echo "Copying results..."
-              echo "================================"
-              # Find the most recent partitioned directory
-              RESULT_DIR=$(ls -dt partitioned_* 2>/dev/null | head -1)
-              if [ -z "$RESULT_DIR" ]; then
-                echo "ERROR: No partitioned results directory found!"
+              # Capture this run dir BEFORE the next run is created (the
+              # partitioned_* glob would otherwise also match the n660 dir).
+              STD_DIR=$(ls -dt partitioned_2* 2>/dev/null | grep -v "partitioned_test_n660" | head -1)
+              if [ -z "$STD_DIR" ]; then
+                echo "ERROR: No standard results directory found!"
                 exit 1
               fi
+              echo "Standard results in: $STD_DIR"
+              cp -r "$STD_DIR" /svFSGe/test_output/standard
 
-              echo "Found results in: $RESULT_DIR"
-              cp -r "$RESULT_DIR" /svFSGe/test_output/
+              echo ""
+              echo "================================"
+              echo "Running FSGe test 2/2: neural-operator n660 surrogate (nmax=2)..."
+              echo "================================"
+              # torch is preinstalled in simvascular/solver:latest; no extra deps.
+              python3 ./fsg.py in_sim/partitioned_test_n660.json 2>&1 | tee /svFSGe/test_output/test_run_n660.log
+
+              N660_DIR=$(ls -dt partitioned_test_n660_* 2>/dev/null | head -1)
+              if [ -z "$N660_DIR" ]; then
+                echo "ERROR: No n660 results directory found!"
+                exit 1
+              fi
+              echo "n660 results in: $N660_DIR"
+              cp -r "$N660_DIR" /svFSGe/test_output/n660
 
               echo ""
               echo "Test execution completed successfully!"
@@ -99,8 +110,12 @@ jobs:
               tail -50 test_output/build.log
             fi
             if [ -f test_output/test_run.log ]; then
-              echo "=== Test run log (last 50 lines) ==="
+              echo "=== Standard test run log (last 50 lines) ==="
               tail -50 test_output/test_run.log
+            fi
+            if [ -f test_output/test_run_n660.log ]; then
+              echo "=== n660 test run log (last 50 lines) ==="
+              tail -50 test_output/test_run_n660.log
             fi
             exit 1
           else
@@ -112,42 +127,66 @@ jobs:
         run: |
           echo "Test output directory contents:"
           ls -la test_output/ || echo "test_output directory is empty or missing"
-          if ls test_output/partitioned_* 1> /dev/null 2>&1; then
-            echo ""
-            echo "Partitioned directory contents:"
-            ls -la test_output/partitioned_*/
-          else
-            echo "No partitioned results found in test_output/"
-          fi
+          for d in standard n660; do
+            if [ -d "test_output/$d" ]; then
+              echo ""
+              echo "$d results directory contents:"
+              ls -la "test_output/$d/"
+            else
+              echo "No $d results found in test_output/"
+            fi
+          done
 
       - name: Install comparison dependencies
         if: success()
         run: pip install numpy meshio
 
-      - name: Compare results with reference
+      - name: Compare standard FSI results with reference
         if: success()
         run: |
           echo "================================"
-          echo "Comparing test results with reference baseline..."
+          echo "Comparing standard FSI results with reference baseline..."
           echo "================================"
 
-          # Find the partitioned directory in test_output
-          RESULT_DIR=$(ls -dt test_output/partitioned_* 2>/dev/null | head -1)
-
-          if [ -z "$RESULT_DIR" ]; then
-            echo "ERROR: No test results found in test_output/"
+          RESULT_DIR=test_output/standard
+          if [ ! -f "$RESULT_DIR/partitioned.json" ]; then
+            echo "ERROR: No standard test results found in $RESULT_DIR"
             echo "The simulation may have failed. Check the test execution logs above."
             exit 1
           fi
 
           echo "Test results: $RESULT_DIR/partitioned.json"
-          echo "Reference: test_reference/nmax_2/reference_results.json"
+          echo "Reference:    test_reference/nmax_2/reference_results.json"
           echo ""
 
           python3 scripts/compare_results.py \
             test_reference/nmax_2/reference_results.json \
             "$RESULT_DIR/partitioned.json" \
             --ref-vtu test_reference/nmax_2/tube_002.vtu \
+            --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu"
+
+      - name: Compare neural-operator (n660) results with reference
+        if: success()
+        run: |
+          echo "================================"
+          echo "Comparing neural-operator n660 results with reference baseline..."
+          echo "================================"
+
+          RESULT_DIR=test_output/n660
+          if [ ! -f "$RESULT_DIR/partitioned_test_n660.json" ]; then
+            echo "ERROR: No n660 test results found in $RESULT_DIR"
+            echo "The simulation may have failed. Check the test execution logs above."
+            exit 1
+          fi
+
+          echo "Test results: $RESULT_DIR/partitioned_test_n660.json"
+          echo "Reference:    test_reference/n660_nmax_2/reference_results.json"
+          echo ""
+
+          python3 scripts/compare_results.py \
+            test_reference/n660_nmax_2/reference_results.json \
+            "$RESULT_DIR/partitioned_test_n660.json" \
+            --ref-vtu test_reference/n660_nmax_2/tube_002.vtu \
             --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu"
 
       - name: Upload test artifacts
