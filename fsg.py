@@ -21,7 +21,9 @@ from svfsi import svFSI, sv_names
 from post import main_arg
 
 from utilities import QRfiltering_mod
-from neural_operator import NeuralOperator
+# NeuralOperator (and its torch dependency) is imported lazily in __init__ only
+# when a neural_operator surrogate is enabled, so the standard FSI path runs
+# without torch installed.
 
 
 class FSG(svFSI):
@@ -35,11 +37,16 @@ class FSG(svFSI):
 
         # neural operator surrogate (replaces fluid + mesh per sub-iteration)
         no_cfg = self.p.get("neural_operator", {})
-        if no_cfg.get("enabled") and "work_dir" not in no_cfg:
-            # Default work_dir inside this run's output dir so each FSG run
-            # keeps its own lddmm_N/ directories (no global /tmp path).
-            no_cfg = dict(no_cfg, work_dir=os.path.join(self.p["f_out"], "lddmm_work"))
-        self.no = NeuralOperator(no_cfg) if no_cfg.get("enabled") else None
+        if no_cfg.get("enabled"):
+            if "work_dir" not in no_cfg:
+                # Default work_dir inside this run's output dir so each FSG run
+                # keeps its own lddmm_N/ directories (no global /tmp path).
+                no_cfg = dict(no_cfg, work_dir=os.path.join(self.p["f_out"], "lddmm_work"))
+            # Lazy import: only pull in torch/NeuralOperator when actually enabled.
+            from neural_operator import NeuralOperator
+            self.no = NeuralOperator(no_cfg)
+        else:
+            self.no = None
 
     def run_post(self):
         # todo: read in automatically

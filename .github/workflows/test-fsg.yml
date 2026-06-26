@@ -83,7 +83,10 @@ jobs:
               echo "================================"
               echo "Running FSGe test 2/2: neural-operator n660 surrogate (nmax=2)..."
               echo "================================"
-              # torch is preinstalled in simvascular/solver:latest; no extra deps.
+              # The neural-operator surrogate needs torch (CPU is enough); the
+              # base image does not ship it, so install the CPU wheel here. The
+              # standard test above runs without torch (lazy import in fsg.py).
+              pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu 2>&1 | tee /svFSGe/test_output/pip_torch.log
               python3 ./fsg.py in_sim/partitioned_test_n660.json 2>&1 | tee /svFSGe/test_output/test_run_n660.log
 
               N660_DIR=$(ls -dt partitioned_test_n660_* 2>/dev/null | head -1)
