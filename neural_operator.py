@@ -233,8 +233,24 @@ class NeuralOperator:
         # is both the correct target and more accurate. If wss_magnitude_pt_file
         # is given we use it and deliver the scalar as a vector with the
         # magnitude in the axial component (downstream norm recovers it exactly).
+        # A stimulus model (out_dim=1) predicts the G&R growth stimulus
+        # s = 1 - |WSS|/tau_o directly; we reconstruct |WSS| = tau_o*(1 - s) and
+        # deliver it through the same scalar path as the magnitude model. tau_o
+        # (wss_homeo) is the homeostatic |WSS| (prestress reference). This is the
+        # quantity the growth law consumes, so training on it focuses capacity
+        # where it matters.
+        self.wss_stimulus_pt = cfg.get("wss_stimulus_pt_file")
         self.wss_magnitude_pt = cfg.get("wss_magnitude_pt_file")
-        if self.wss_magnitude_pt:
+        self.wss_homeo = cfg.get("wss_homeo", 0.011841)
+        self.wss_is_stimulus = False
+        self.wss_is_magnitude = False
+        if self.wss_stimulus_pt:
+            self.model = self._load_model(
+                ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
+                pt_file=self.wss_stimulus_pt,
+            )
+            self.wss_is_stimulus = True
+        elif self.wss_magnitude_pt:
             self.model = self._load_model(
                 ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=1,
                 pt_file=self.wss_magnitude_pt,
@@ -245,7 +261,6 @@ class NeuralOperator:
                 ShearStressNN, branch_dims, trunk_dims, final_dim, out_dim=3,
                 pt_file=cfg["pt_file"],
             )
-            self.wss_is_magnitude = False
 
         # Pressure model (out_dim=1) — required: solid solver always needs interface pressure
         pressure_pt = cfg["pressure_pt_file"]
@@ -255,7 +270,10 @@ class NeuralOperator:
         )
         print(f"[NeuralOperator] pressure model: {pressure_pt}")
 
-        if self.wss_is_magnitude:
+        if self.wss_is_stimulus:
+            print(f"[NeuralOperator] WSS model (STIMULUS 1-tau/tauo, out_dim=1): {self.wss_stimulus_pt}")
+            print(f"[NeuralOperator]   tau_o (wss_homeo) = {self.wss_homeo:.6f}; |WSS|=tau_o*(1-s)")
+        elif self.wss_is_magnitude:
             print(f"[NeuralOperator] WSS model (magnitude, out_dim=1): {self.wss_magnitude_pt}")
         else:
             print(f"[NeuralOperator] WSS model (vector, out_dim=3): {cfg['pt_file']}")
@@ -570,7 +588,16 @@ class NeuralOperator:
         coeffs_t = torch.from_numpy(np.tile(coeffs, (n_pts, 1))).to(self.device)
         xyz_t    = torch.from_numpy(np.asarray(trunk_input, dtype=np.float32)).to(self.device)
 
-        if self.wss_is_magnitude:
+        if self.wss_is_stimulus:
+            # model predicts the growth stimulus s = 1 - |WSS|/tau_o; reconstruct
+            # |WSS| = tau_o*(1 - s) and deliver it as a vector with the magnitude
+            # in the axial (z) component (downstream norm recovers it exactly).
+            s   = self._forward(self.model, coeffs_t, xyz_t).reshape(-1)     # (N_solid,)
+            mag = (self.wss_homeo * (1.0 - s)).astype(np.float32)
+            np.clip(mag, 0.0, None, out=mag)   # WSS magnitude is non-negative
+            wss = np.zeros((len(mag), 3), dtype=np.float32)
+            wss[:, 2] = mag
+        elif self.wss_is_magnitude:
             # model predicts the scalar |WSS|; deliver it as a vector with the
             # magnitude in the axial (z) component so the downstream norm in the
             # FSG coupling (svfsi.py) recovers |WSS| exactly. (Direction is

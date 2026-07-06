@@ -234,8 +234,9 @@ class FSG(svFSI):
         # archive results
         self.archive()
 
-        # plot convergence
-        self.plot_convergence()
+        # plot convergence (skipped for arc-length: no per-step coupling residual log)
+        if not self.p.get("arc_length", {}).get("enabled"):
+            self.plot_convergence()
 
         # post process
         main_arg([self.p["f_out"]])
@@ -244,17 +245,17 @@ class FSG(svFSI):
         # print reynolds number
         print("Re = " + str(int(self.p["re"])))
 
-        # loop load steps
+        # Crisfield spherical arc-length continuation (opt-in via JSON "arc_length")
+        if self.p.get("arc_length", {}).get("enabled"):
+            self._run_arclength(i_start)
+            return
+
+        # loop load steps (historical load-controlled scheme)
         i = i_start
         for t in range(t_start, self.p["nloads"] + 1):
             print(
-                "=" * 30
-                + " t "
-                + str(t)
-                + " ==== fp "
-                + "{:.2f}".format(self.p_vec[t])
-                + " "
-                + "=" * 30
+                "=" * 30 + " t " + str(t) + " ==== fp "
+                + "{:.2f}".format(self.p_vec[t]) + " " + "=" * 30
             )
 
             # predict solution for next load step
@@ -263,10 +264,7 @@ class FSG(svFSI):
 
             # loop sub-iterations
             for n in range(self.p["coup"]["nmax"]):
-                # count total iterations (load + sub-iterations)
                 i += 1
-
-                # perform coupling step
                 times = {}
                 if self.p["coup"]["method"] in ["static", "aitken"]:
                     status = self.coup_step_relax(i, t, n, times)
@@ -294,37 +292,496 @@ class FSG(svFSI):
                 for f in times.keys():
                     out += "{:.2e}".format(times[f]) + "\t"
 
-                # check if coupling unconverged (screen and file output)
                 if n == self.p["coup"]["nmax"] - 1:
                     out += "\n\tcoupling unconverged"
                     status = True
                 print(out)
 
-                # archive solution
                 dst = os.path.join(self.p["f_sim"], "tube_" + str(i).zfill(3) + ".vtu")
                 self.curr.archive("tube", dst)
 
-                # check if coupling converged
                 if status:
-                    # save converged steps
                     i_conv = str(i).zfill(3)
                     t_conv = str(t).zfill(3)
-
                     srcs = os.path.join(self.p["f_sim"], "*_" + i_conv + ".*")
                     for src in glob.glob(srcs):
                         trg = os.path.basename(src).replace(i_conv, t_conv)
                         trg = os.path.join(self.p["f_conv"], trg)
                         shutil.copyfile(src, trg)
-
-                    # archive
                     self.converged += [self.curr.copy()]
-
-                    # save restart checkpoint (opt-in via JSON "save_restart" flag)
                     if self.p.get("save_restart", False):
                         self.save_restart(t, i)
-
-                    # terminate coupling
                     break
+
+    # ======================================================================
+    # Crisfield spherical arc-length continuation in (interface displacement d,
+    # growth-load factor lambda). Solves the partitioned NN-FSG equilibrium
+    # R(d,lambda) = solid(NN(d), lambda) - d = 0 together with the spherical
+    # constraint  ||d - d_n||^2 + a*(lambda - lambda_n)^2 = dl^2,  so the path can
+    # traverse a growth limit point where load control diverges. Uses the solver's
+    # explicit idempotent restart (--restart-in/--restart-out): every solid
+    # evaluation advances from the SAME committed step-(n-1) checkpoint, so
+    # re-evaluating at a different lambda never compounds the G&R history.
+    # Opt-in via JSON "arc_length": {enabled, dl, a, omega, tol, max_corr,
+    # lambda_max, max_steps}. Requires wss_relax=1 (no WSS damping).
+    # ======================================================================
+    def _run_arclength(self, i_start):
+        """Single-loop Crisfield spherical arc-length. Per load step, the EXISTING
+        coupling algorithm (Aitken / IQN-ILS) drives the interface displacement;
+        the load factor lambda rides inside the same sub-iteration loop. Each
+        sub-iteration:
+          1. solid solve S(F(d), lambda) at the current lambda (NN WSS = F(d)),
+             advancing from the committed step-(t-1) checkpoint (idempotent
+             --restart-in), so re-evaluating at a new lambda never compounds G&R;
+          2. coupling relaxation (coup_step_*) produces the new interface disp;
+          3. solve the sphere (centered at the previous converged step) for lambda
+                ||d_new - d_old||^2 + phi^2 (lambda - lam_old)^2 = ds^2
+             and take the LARGER root: lambda = lam_old + sqrt(.)/phi;
+          4. repeat until the coupling algorithm converges.
+        Config "arc_length": {enabled, ds, phi, lambda_max, max_steps}.
+        Requires wss_relax=1 (no WSS damping).
+
+        mode="nested" switches to the inner-fixed-lambda / outer-continuation
+        scheme (see _run_arclength_nested); default "single" is this loop."""
+        if self.p["arc_length"].get("mode", "single") in ("nested", "disp"):
+            return self._run_arclength_nested(i_start)
+        ac        = self.p["arc_length"]
+        ds        = ac.get("ds", ac.get("dl", 0.1))
+        phi       = ac.get("phi", 1.0)
+        lam_relax = ac.get("lam_relax", 0.3)   # under-relax lambda over sub-iters
+        lam_max   = ac.get("lambda_max", 1.0)
+        nstep     = ac.get("max_steps", 200)
+        ds_min    = ac.get("ds_min", 0.02 * ds)  # arc step floor -> below = limit point
+        ds_max    = ac.get("ds_max", ds)         # arc step cap when growing
+        nmax      = self.p["coup"]["nmax"]
+        method    = self.p["coup"]["method"]
+        control   = ac.get("control", "sphere")  # "sphere" or "disp" (uniform |dd|)
+        # arc can take more steps than nloads; pad the pressure-factor vector
+        # (p_vec[t] indexed in set_fluid/set_solid) with its last value (fmax).
+        self.p_vec = np.concatenate([self.p_vec, np.full(nstep + 2, self.p_vec[-1])])
+
+        os.makedirs(os.path.join(self.p["f_out"], "arc_ckpt"), exist_ok=True)
+        ckpt    = os.path.join("arc_ckpt", "ckpt.bin")        # committed step t-1
+        scratch = os.path.join("arc_ckpt", "scratch.bin")     # per-sub-iter write
+        self._lam_sched = {}
+        # trajectory log saved to arc_data.npy (read by post.plot_arc), mirroring
+        # the debug_qr.npy / plot_cc convention
+        self._arc_log = {"t": [], "n": [], "lam": [], "dd": [], "res": [], "ds": [],
+                         "accept_t": [], "accept_lam": [], "tol": self.p["coup"]["tol"]}
+
+        # CRITICAL: make the solid solver READ the arc load curve. Patch the
+        # GR_equilibrated XML to load_profile="file" pointing at gr_load_curve.dat
+        # (which _arc_set_load rewrites each sub-iter). Without this the solver
+        # ignores the curve and falls back to its default tanh ramp -> lambda
+        # never reaches the solid (the load factor would be a phantom).
+        self.p["gr_load"] = {"profile": "file",
+                             "curve": [[x, 0.0] for x in range(self.p["nloads"] + 1)]}
+        self.set_gr_load()
+
+        # --- prestress (load step 0): establish d_old + committed checkpoint ---
+        # Run prestress through the normal coupling (no restart flags -> standard
+        # stFile_last.bin continuity), works for NN and real-CFD; then snapshot the
+        # converged solid restart to ckpt for the arc steps to advance from.
+        i0 = i_start
+        i, d_old = self._arc_prestress(i0)   # i = monotonic global sub-iter counter
+        lam_old = 0.0
+        self.converged += [self.curr.copy()]
+        self._arc_good = self.curr.copy()   # last-good solution for retry restore
+        sd = self.p["out"]["solid"]
+        last = os.path.join(self.p["f_out"], sd, "stFile_last.bin")
+        if os.path.exists(last):
+            shutil.copyfile(last, os.path.join(self.p["f_out"], ckpt))
+        # post(solid) reads the latest gr_restart while arc is active (the n=0
+        # restart resets decouple the solver cTS from the monotonic index i).
+        self._arc_active = True
+        print("[arc] prestress |d|=%.4g finite=%s lam=0"
+              % (np.linalg.norm(d_old), bool(np.all(np.isfinite(d_old)))))
+
+        for step in range(1, nstep + 1):
+            t = step
+
+            # Final step: if a full arc increment would reach/cross lambda_max,
+            # switch this step to LOAD CONTROL pinned at lambda_max so the path
+            # lands EXACTLY on lambda=1 (skip the sphere update).
+            final = (lam_old + ds / phi >= lam_max - 1e-12)
+
+            # adaptive arc step: retry with halved ds on failure. ds shrinking below
+            # ds_min while the step keeps failing => genuine limit point (fold).
+            ds_try = ds
+            ok = False
+            n = 0
+            err = np.nan
+            d_new = d_old
+            while True:
+                # restore the last-good solution (a failed solid solve sets the
+                # whole curr.sol field to None; the retry must start from it)
+                self.curr = self._arc_good.copy()
+                # fresh coupling history for this independent fixed-point solve
+                self.res = []
+                self.dk = defaultdict(list)
+                self.dtk = defaultdict(list)
+                self.mat_V = []
+                self.mat_W = []
+
+                # predictor: half a pure-load increment (the sphere pulls lambda to
+                # the feasible value), or the exact target on the final step
+                self._arc_lam = lam_max if final else lam_old + 0.5 * ds_try / phi
+                ok = False
+                lam_prev, dd_prev = lam_old, 0.0   # secant tracker (disp control)
+                for n in range(nmax):
+                    i += 1                  # monotonic per sub-iter (fluid/mesh advance)
+                    # reset solid to the committed t-1 checkpoint only at n=0 (so a
+                    # re-solve at a new lambda doesn't compound G&R); within the step
+                    # the solid continues normally (like the vanilla loop), so the
+                    # fluid re-solves on the updated mesh and WSS actually changes.
+                    self.restart_in = ckpt if n == 0 else None
+                    self.restart_out = None
+                    self._arc_set_load(t, self._arc_lam)
+                    times = {}
+                    if method in ["static", "aitken"]:
+                        status = self.coup_step_relax(i, t, n, times)
+                    elif method == "iqn_ils":
+                        status = self.coup_step_iqn_ils(i, t, n, times)
+                    else:
+                        raise ValueError("Unknown coupling method " + method)
+
+                    if any(s is None for s in self.curr.sol.values()):
+                        print("[arc]   solid failed (lam=%.4f, n=%d, ds=%.4f)"
+                              % (self._arc_lam, n, ds_try))
+                        self._arc_logrow(t, n, self._arc_lam, np.nan, np.nan, ds_try)
+                        break
+                    d_new = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
+                    if not np.all(np.isfinite(d_new)):
+                        print("[arc]   NaN disp (lam=%.4f, n=%d, ds=%.4f)"
+                              % (self._arc_lam, n, ds_try))
+                        self._arc_logrow(t, n, self._arc_lam, np.nan, np.nan, ds_try)
+                        break
+
+                    # PHYSICAL displacement metric: MEAN nodal displacement increment
+                    # (cm), consistent with the coupling residual norm (coup_err also
+                    # uses the mean nodal |.|). Commensurate with phi [cm]. (The
+                    # full-field L2 norm scales ~sqrt(672*3) and is not a length.)
+                    dd = float(np.linalg.norm((d_new - d_old).reshape(-1, 3), axis=1).mean())
+
+                    # lambda update (skipped on the final load-controlled step):
+                    #   sphere: larger root of ||dd||^2+phi^2 dlam^2 = ds^2 (load-dominated
+                    #           -> ~uniform dlam, accelerating dd)
+                    #   disp  : secant drive dd -> ds (uniform |dd| per step; dlam VARIES,
+                    #           big early/stiff, small late/soft). ds = target mean|dd|.
+                    if not final:
+                        if control == "disp":
+                            slope = (dd - dd_prev) / (self._arc_lam - lam_prev) \
+                                if abs(self._arc_lam - lam_prev) > 1e-9 else dd / max(self._arc_lam - lam_old, 1e-6)
+                            slope = max(slope, 1e-4)          # dd increases with lambda
+                            lam_prev, dd_prev = self._arc_lam, dd
+                            lam_tgt = self._arc_lam + (ds_try - dd) / slope
+                            self._arc_lam = self._arc_lam + lam_relax * (lam_tgt - self._arc_lam)
+                            self._arc_lam = min(max(self._arc_lam, lam_old), lam_max)
+                        else:
+                            rhs = ds_try * ds_try - dd * dd
+                            lam_tgt = lam_old + np.sqrt(max(rhs, 0.0)) / phi
+                            self._arc_lam = self._arc_lam + lam_relax * (lam_tgt - self._arc_lam)
+
+                    err = self.err["disp"][-1][-1]
+                    self._arc_logrow(t, n, self._arc_lam, dd, err, ds_try)
+                    print("  [arc] t%d n%d lam=%.4f mean|dd|=%.4f |r|=%.2e ds=%.4f"
+                          % (t, n, self._arc_lam, dd, err, ds_try))
+                    if status:
+                        ok = True
+                        break
+
+                if ok or final:
+                    break
+                ds_try *= 0.5
+                if ds_try < ds_min:
+                    print("[arc] LIMIT POINT near lambda=%.4f: step fails for ds "
+                          "down to %.4g (likely a fold)" % (lam_old, ds_try * 2))
+                    break
+                print("[arc]   cutting ds -> %.4f and retrying step %d" % (ds_try, t))
+
+            if not ok:
+                print("[arc] stop: step %d did not converge (lam=%.4f, |r|=%.2e)"
+                      % (t, self._arc_lam, err))
+                self._arc_save()
+                return
+
+            # adaptive: grow ds if the step converged easily, else keep ds_try
+            ds = min(ds_try * 1.3, ds_max) if (n + 1) <= 20 else ds_try
+
+            # accept: commit checkpoint, advance the sphere center
+            lam_new = self._arc_lam
+            dd_mean = float(np.linalg.norm((d_new - d_old).reshape(-1, 3), axis=1).mean())
+            print("[arc] step %d: lam=%.4f (dlam=%+.4f) mean|dd|=%.4f |r|=%.2e n=%d"
+                  % (t, lam_new, lam_new - lam_old, dd_mean, err, n + 1))
+            self._arc_commit(t, ckpt, last)
+            self.converged += [self.curr.copy()]
+            self._arc_good = self.curr.copy()   # update last-good for retry restore
+            self._lam_sched[t] = lam_new
+            self._arc_log["accept_t"].append(t)
+            self._arc_log["accept_lam"].append(lam_new)
+            d_old, lam_old = d_new, lam_new
+
+            if lam_new >= lam_max:
+                print("[arc] reached lambda_max=%.3f at step %d" % (lam_max, t))
+                self._arc_save()
+                return
+        print("[arc] reached max_steps=%d" % nstep)
+        self._arc_save()
+
+    # ==================================================================
+    # NESTED arc-length: OUTER continuation in lambda + INNER fixed-lambda
+    # coupling solve (IQN-ILS / Aitken). Because lambda is CONSTANT inside the
+    # inner solve, the map R(d,lambda)=S(F(d),lambda)-d is stationary, so the
+    # IQN-ILS quasi-Newton history is valid (unlike the single-loop scheme).
+    #   d(lambda) := inner solve of R(.,lambda)=0 (implicit function).
+    #   Outer: find lambda s.t. the converged d(lambda) lies on the sphere
+    #     g(lambda)= ||d(lambda)-d_old||^2 + phi^2 (lambda-lam_old)^2 - ds^2 = 0
+    #   solved by a bracketed secant; each g-eval = one inner solve.
+    # Config "arc_length": {mode:"nested", ds, phi, lambda_max, max_steps,
+    #   tol_arc (rel. sphere tol, default 0.02), max_corr (default 8), ds_min}.
+    # ==================================================================
+    def _run_arclength_nested(self, i_start):
+        ac        = self.p["arc_length"]
+        ds        = ac.get("ds", 0.06)
+        phi       = ac.get("phi", 0.6)
+        lam_max   = ac.get("lambda_max", 1.0)
+        nstep     = ac.get("max_steps", 40)
+        ds_min    = ac.get("ds_min", 0.1 * ds)
+        ds_max    = ac.get("ds_max", ds)
+        tol_arc   = ac.get("tol_arc", 0.02)      # accept if |sphere_dist-ds| < tol_arc*ds
+        max_corr  = ac.get("max_corr", 8)
+        # arc can exceed nloads steps; pad the pressure-factor vector (see single-loop)
+        self.p_vec = np.concatenate([self.p_vec, np.full(nstep + 2, self.p_vec[-1])])
+
+        os.makedirs(os.path.join(self.p["f_out"], "arc_ckpt"), exist_ok=True)
+        ckpt = os.path.join("arc_ckpt", "ckpt.bin")
+        self._lam_sched = {}
+        self._arc_log = {"t": [], "n": [], "lam": [], "dd": [], "res": [], "ds": [],
+                         "accept_t": [], "accept_lam": [], "tol": self.p["coup"]["tol"]}
+
+        # patch solid XML so the solver READS the load curve (else default tanh)
+        self.p["gr_load"] = {"profile": "file",
+                             "curve": [[x, 0.0] for x in range(self.p["nloads"] + 1)]}
+        self.set_gr_load()
+
+        # prestress -> d_old, committed checkpoint
+        self._arc_i, d_old = self._arc_prestress(i_start)
+        lam_old = 0.0
+        self.converged += [self.curr.copy()]
+        self._arc_good = self.curr.copy()
+        sd = self.p["out"]["solid"]
+        last = os.path.join(self.p["f_out"], sd, "stFile_last.bin")
+        if os.path.exists(last):
+            shutil.copyfile(last, os.path.join(self.p["f_out"], ckpt))
+        self._arc_active = True
+        dlam_sign = 1.0
+        control = "disp" if ac.get("mode") == "disp" else "sphere"
+        # displacement-control: uniform bulge increment ds per step, lambda solved
+        # (lambda steps then VARY: large early/stiff, small late/soft). sphere:
+        # ds/phi is the lambda predictor; disp: use the previous accepted |dlam|.
+        dlam_guess = ds / phi
+        print("[arc-nested] control=%s prestress |d|=%.4g lam=0"
+              % (control, np.linalg.norm(d_old)))
+
+        for step in range(1, nstep + 1):
+            t = step
+            ds_try = ds
+            accepted = False
+            while ds_try >= ds_min:
+                self._arc_ds_cur = ds_try
+                lam, d, ok = self._arc_outer_correct(
+                    t, d_old, lam_old, phi, ds_try, tol_arc, max_corr,
+                    ckpt, lam_max, dlam_sign, control=control, step_guess=dlam_guess)
+                if ok:
+                    accepted = True
+                    break
+                print("[arc-nested]   step %d: no root (ds=%.4f) -> cut"
+                      % (t, ds_try))
+                ds_try *= 0.5
+            if not accepted:
+                print("[arc-nested] LIMIT POINT near lambda=%.4f (fails to ds=%.4g)"
+                      % (lam_old, ds_try * 2))
+                self._arc_save()
+                return
+
+            # accept
+            print("[arc-nested] step %d: lam=%.4f (dlam=%+.4f)  ds=%.4f"
+                  % (t, lam, lam - lam_old, ds_try))
+            shutil.copyfile(last, os.path.join(self.p["f_out"], ckpt))  # commit t-1<-t
+            self.curr.archive("tube", os.path.join(
+                self.p["f_conv"], "tube_" + str(t).zfill(3) + ".vtu"))
+            self.converged += [self.curr.copy()]
+            self._arc_good = self.curr.copy()
+            self._lam_sched[t] = lam
+            self._arc_log["accept_t"].append(t)
+            self._arc_log["accept_lam"].append(lam)
+            dlam_sign = 1.0 if (lam - lam_old) >= 0 else -1.0
+            if abs(lam - lam_old) > 1e-6:
+                dlam_guess = abs(lam - lam_old)  # predictor for next disp-control step
+            d_old, lam_old = d, lam
+            ds = min(ds_try * 1.3, ds_max)      # adaptive grow
+
+            if lam_old >= lam_max - 1e-9:
+                print("[arc-nested] reached lambda_max=%.3f at step %d" % (lam_max, t))
+                self._arc_save()
+                return
+        print("[arc-nested] reached max_steps=%d" % nstep)
+        self._arc_save()
+
+    def _arc_outer_correct(self, t, d_old, lam_old, phi, ds, tol_arc, max_corr,
+                           ckpt, lam_max, sign, control="sphere", step_guess=None):
+        """Bracketed secant on the SIGNED constraint distance c(lambda):
+          control="sphere": c = sqrt(||d(lam)-d_old||^2 + phi^2(lam-lam_old)^2) - ds
+          control="disp"  : c = ||d(lam)-d_old||_meannodal - ds   (uniform disp step)
+        c(lam) is monotone increasing in lam (dd grows with lam), c(lam_old)~-ds.
+        d(lam) from a fixed-lambda inner solve. Returns (lam, d, ok). Accept |c|<tol_arc*ds.
+        step_guess = lambda-increment for the bracket predictor (defaults: ds/phi
+        for sphere, previous dlam for disp)."""
+        if step_guess is None or step_guess <= 0:
+            step_guess = ds / phi if control == "sphere" else 0.1
+
+        def c_of(lam):
+            d, conv = self._arc_inner_solve(t, lam, ckpt)
+            if not conv:
+                return None, None
+            # MEAN nodal displacement increment (cm) -- consistent with coup_err.
+            dd = float(np.linalg.norm((d - d_old).reshape(-1, 3), axis=1).mean())
+            if control == "disp":
+                c = dd - ds
+            else:
+                c = np.sqrt(dd * dd + phi * phi * (lam - lam_old) ** 2) - ds
+            return c, d
+
+        lo_lam, lo_c = lam_old, -ds              # c(lam_old) ~ -ds (dd~0) < 0
+        hi_lam = min(max(lam_old + sign * step_guess, 0.0), lam_max)
+        hi_c, d_hi = c_of(hi_lam)
+        if hi_c is None:
+            return hi_lam, None, False           # inner failed -> caller cuts ds
+        expand = 0
+        while hi_c < 0.0 and expand < 6:
+            lo_lam, lo_c = hi_lam, hi_c
+            hi_lam = min(hi_lam + sign * step_guess, lam_max)
+            hi_c, d_hi = c_of(hi_lam)
+            if hi_c is None:
+                return hi_lam, None, False
+            expand += 1
+        if abs(hi_c) < tol_arc * ds:
+            return hi_lam, d_hi, True
+
+        a_lam, a_c = lo_lam, lo_c                 # secant/regula-falsi (a: c<0, b: c>0)
+        b_lam, b_c, d_b = hi_lam, hi_c, d_hi
+        for _ in range(max_corr):
+            c_lam = b_lam - b_c * (b_lam - a_lam) / (b_c - a_c + 1e-30)
+            c_lam = min(max(c_lam, 0.0), lam_max)
+            cc, d_c = c_of(c_lam)
+            if cc is None:
+                return c_lam, None, False
+            if abs(cc) < tol_arc * ds:
+                return c_lam, d_c, True
+            if (cc > 0.0) == (b_c > 0.0):
+                b_lam, b_c, d_b = c_lam, cc, d_c
+            else:
+                a_lam, a_c = c_lam, cc
+        return c_lam, d_c, False                 # no root in budget -> caller cuts ds
+
+    def _arc_inner_solve(self, t, lam, ckpt):
+        """Solve R(d,lambda)=0 at FIXED lambda from the committed t-1 checkpoint,
+        using the existing coupling (IQN-ILS / Aitken). Returns (d_flat, converged).
+        lambda constant => stationary map => IQN-ILS history is valid."""
+        method = self.p["coup"]["method"]
+        nmax = self.p["coup"]["nmax"]
+        self.curr = self._arc_good.copy()        # start from last-good geometry
+        self.res = []
+        self.dk = defaultdict(list)
+        self.dtk = defaultdict(list)
+        self.mat_V = []
+        self.mat_W = []
+        self._arc_set_load(t, lam)               # FIXED lambda for the whole inner solve
+        d = self._arc_good.get(("solid", "disp", "int")).flatten()
+        ok = False
+        for n in range(nmax):
+            self._arc_i += 1
+            self.restart_in = ckpt if n == 0 else None   # reset to t-1 at n=0 only
+            self.restart_out = None
+            times = {}
+            if method in ["static", "aitken"]:
+                status = self.coup_step_relax(self._arc_i, t, n, times)
+            elif method == "iqn_ils":
+                status = self.coup_step_iqn_ils(self._arc_i, t, n, times)
+            else:
+                raise ValueError("Unknown coupling method " + method)
+            if any(s is None for s in self.curr.sol.values()):
+                return d, False
+            d = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
+            if not np.all(np.isfinite(d)):
+                return d, False
+            err = self.err["disp"][-1][-1]
+            dd = float(np.linalg.norm(
+                (d - self._arc_good.get(("solid", "disp", "int")).flatten()
+                 ).reshape(-1, 3), axis=1).mean())
+            self._arc_logrow(t, n, lam, dd, err, getattr(self, "_arc_ds_cur", 0.0))
+            if status:
+                ok = True
+                break
+        print("[arc-nested]   inner lam=%.4f -> conv=%s n=%d mean|dd|=%.4f |r|=%.2e"
+              % (lam, ok, n + 1, dd, err))
+        return d, ok
+
+    def _arc_logrow(self, t, n, lam, dd, res, ds):
+        """Append one trajectory row (converged sub-iter OR failed attempt)."""
+        L = self._arc_log
+        L["t"].append(t); L["n"].append(n); L["lam"].append(lam)
+        L["dd"].append(dd); L["res"].append(res); L["ds"].append(ds)
+
+    def _arc_save(self):
+        """Persist the arc-length trajectory for post.plot_arc (cf. debug_qr.npy)."""
+        np.save(os.path.join(self.p["f_out"], "arc_data.npy"), self._arc_log)
+
+    def _arc_set_load(self, t, lam):
+        """gr_load ramp curve: committed factors for steps < t, lam at step >= t."""
+        n = self.p["nloads"]
+        sched = getattr(self, "_lam_sched", {})
+        path = os.path.join(self.p["f_out"], "in_svfsi", "gr_load_curve.dat")
+        with open(path, "w") as f:
+            for x in range(max(n, t) + 1):
+                if x == 0:
+                    y = 0.0
+                elif x < t:
+                    y = sched.get(x, lam)
+                else:
+                    y = lam
+                f.write("%d %.10g\n" % (x, y))
+
+    def _arc_commit(self, t, ckpt, scratch):
+        """Promote the accepted scratch checkpoint to committed; archive the tube."""
+        src = os.path.join(self.p["f_out"], scratch)
+        dst = os.path.join(self.p["f_out"], ckpt)
+        if os.path.exists(src):
+            shutil.copyfile(src, dst)
+        self.curr.archive("tube", os.path.join(self.p["f_conv"], "tube_" + str(t).zfill(3) + ".vtu"))
+
+    def _arc_prestress(self, i0):
+        """Run prestress (load step 0) through the normal coupling loop (works for
+        NN and real-CFD), with standard stFile_last.bin continuity (no restart
+        flags). Returns (final i, prestressed interface displacement flattened)."""
+        self.restart_in, self.restart_out = None, None
+        self._arc_set_load(0, 0.0)
+        method = self.p["coup"]["method"]
+        i = i0
+        for n in range(self.p["coup"]["nmax"]):
+            i += 1
+            times = {}
+            if method in ["static", "aitken"]:
+                status = self.coup_step_relax(i, 0, n, times)
+            elif method == "iqn_ils":
+                status = self.coup_step_iqn_ils(i, 0, n, times)
+            else:
+                raise ValueError("Unknown coupling method " + method)
+            if any(s is None for s in self.curr.sol.values()):
+                raise RuntimeError("arc-length prestress failed at sub-iter %d" % n)
+            if status:
+                break
+        return i, deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
 
     def plot_convergence(self):
         n_sol = len(self.err.keys())

@@ -540,6 +540,18 @@ class svFSI(Simulation):
         exe += [join(self.p["paths"]["exe"], self.p["exe"][name])]
         exe += [join("in_svfsi", self.p["inp"][name])]
 
+        # Explicit restart paths for the solid G&R solver. A continuation driver
+        # (arc-length / displacement / stimulus) can set self.restart_in /
+        # self.restart_out to re-solve the same load step from an exact
+        # checkpoint at different load factors without the solver compounding
+        # state: --restart-in is read exactly (never "_last"), --restart-out is
+        # written exactly. Paths are relative to f_out (the solver's cwd).
+        if name == "solid":
+            if getattr(self, "restart_in", None):
+                exe += ["--restart-in", self.restart_in]
+            if getattr(self, "restart_out", None):
+                exe += ["--restart-out", self.restart_out]
+
         t_start = time.time()
         if self.p["debug"]:
             print(" ".join(exe))
@@ -733,7 +745,18 @@ class svFSI(Simulation):
         if domain == "solid":
             # read current iteration
             fields = ["disp", "jac", "cauchy", "stress", "strain", "gr"]
-            src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
+            if getattr(self, "_arc_active", False):
+                # arc-length: the n=0 restart resets decouple solver cTS from i,
+                # so read the most-recently-written gr_restart file instead.
+                import glob as _g
+                cand = _g.glob(join(self.p["f_out"], fname + "*.vtu"))
+                if cand:
+                    # return path RELATIVE to f_out (post re-joins f_out below)
+                    src = [os.path.relpath(max(cand, key=os.path.getmtime), self.p["f_out"])]
+                else:
+                    src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
+            else:
+                src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
         elif domain == "fluid":
             # read converged steady state flow
             fields = ["velo", "wss", "press"]
