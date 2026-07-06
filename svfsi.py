@@ -193,6 +193,7 @@ class svFSI(Simulation):
         # solid XML
         self.set_gr_load()
         self.set_gr_insult()
+        self.set_gr_growth()
 
     def _write_curve(self, rel_path, curve):
         """Write a 2-column tabulated curve to <f_out>/<rel_path>. Each row is
@@ -226,6 +227,22 @@ class svFSI(Simulation):
                 )
         with open(xml_file, "w") as f:
             f.write(xml)
+
+    def set_gr_growth(self):
+        """Inject optional G&R growth-stabilization params into the solid XML.
+
+        Currently exposes <tau_ratio_floor> (config key "tau_ratio_floor"): a
+        lower clamp on the WSS-stimulus ratio tau/tauo in gr_equilibrated.cpp.
+        A developed aneurysm bulge has collapsed luminal WSS (recirculation); an
+        accurate WSS surrogate then drives tau/tauo -> 0, saturating the growth
+        stimulus into runaway growth the partitioned coupling cannot integrate.
+        A positive floor caps that. Omitting the key leaves the XML untouched
+        (svFSI default 0 = disabled = historical behavior).
+        """
+        floor = self.p.get("tau_ratio_floor")
+        if floor is None:
+            return
+        self._patch_solid_xml({"tau_ratio_floor": floor})
 
     def set_gr_load(self):
         """Inject the G&R load profile from the JSON into the solid solver XML.
@@ -570,6 +587,18 @@ class svFSI(Simulation):
         exe += [join(self.p["paths"]["exe"], self.p["exe"][name])]
         exe += [join("in_svfsi", self.p["inp"][name])]
 
+        # Explicit restart paths for the solid G&R solver. A continuation driver
+        # (arc-length / displacement / stimulus) can set self.restart_in /
+        # self.restart_out to re-solve the same load step from an exact
+        # checkpoint at different load factors without the solver compounding
+        # state: --restart-in is read exactly (never "_last"), --restart-out is
+        # written exactly. Paths are relative to f_out (the solver's cwd).
+        if name == "solid":
+            if getattr(self, "restart_in", None):
+                exe += ["--restart-in", self.restart_in]
+            if getattr(self, "restart_out", None):
+                exe += ["--restart-out", self.restart_out]
+
         t_start = time.time()
         if self.p["debug"]:
             print(" ".join(exe))
@@ -763,7 +792,18 @@ class svFSI(Simulation):
         if domain == "solid":
             # read current iteration
             fields = ["disp", "jac", "cauchy", "stress", "strain", "gr"]
-            src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
+            if getattr(self, "_arc_active", False):
+                # arc-length: the n=0 restart resets decouple solver cTS from i,
+                # so read the most-recently-written gr_restart file instead.
+                import glob as _g
+                cand = _g.glob(join(self.p["f_out"], fname + "*.vtu"))
+                if cand:
+                    # return path RELATIVE to f_out (post re-joins f_out below)
+                    src = [os.path.relpath(max(cand, key=os.path.getmtime), self.p["f_out"])]
+                else:
+                    src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
+            else:
+                src = [fname + str(self.p["n_max"][domain] * i).zfill(3) + ".vtu"]
         elif domain == "fluid":
             # read converged steady state flow
             fields = ["velo", "wss", "press"]

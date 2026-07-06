@@ -9,6 +9,8 @@ import json
 import scipy
 import xmltodict
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 
 from matplotlib.ticker import StrMethodFormatter
@@ -576,7 +578,7 @@ def plot_single(data, coords, param, out, study, quant, locations, time=-1):
     plt.tight_layout()
     fname += time_str + ".pdf"
     fig.savefig(os.path.join(out, fname), bbox_inches="tight")
-    plt.cla()
+    plt.close(fig)
     print(fname)
 
 
@@ -799,6 +801,104 @@ def plot_cc(f_out, out):
     print("cc_coefficients.pdf")
 
 
+def plot_arc(f_run, out):
+    # load arc-length trajectory (saved by fsg._run_arclength), cf. debug_qr.npy
+    f_npy = os.path.join(f_run, "arc_data.npy")
+    if not os.path.exists(f_npy):
+        return
+    d = np.load(f_npy, allow_pickle=True).item()
+    lam = np.array(d["lam"]); dd = np.array(d["dd"]); res = np.array(d["res"])
+    t_arr = np.array(d["t"])
+    ds = np.array(d["ds"]) if "ds" in d and len(d["ds"]) == len(lam) else None
+    tol = d.get("tol", 1e-4)
+    acc_t = np.array(d["accept_t"]); acc_lam = np.array(d["accept_lam"])
+    n_iter = len(lam)
+    if n_iter == 0:
+        return
+
+    x = np.arange(n_iter)
+    xlim = (-0.5, n_iter - 0.5)
+
+    # load-step transition boundaries (first sub-iter index of each new t)
+    transitions = [i for i in range(1, n_iter) if t_arr[i] != t_arr[i - 1]]
+
+    def add_vlines(ax, with_label=False):
+        for xv in transitions:
+            lbl = f"t={t_arr[xv-1]}$\\to${t_arr[xv]}" if with_label else None
+            ax.axvline(xv - 0.5, color="k", linestyle="--", linewidth=1, label=lbl)
+
+    # per-step load increment: lambda - lambda_old, where lambda_old = accepted
+    # lambda of the PREVIOUS step (0 for step 1). Resets each load step, like dd.
+    acc = {int(at): al for at, al in zip(acc_t, acc_lam)}
+    dlam = np.array([lam[k] - acc.get(int(t_arr[k]) - 1, 0.0) for k in range(n_iter)])
+
+    nrows = 5 if ds is not None else 4
+    fig, axes = plt.subplots(nrows, 1, figsize=(12, 2.6 * nrows), dpi=150, sharex=True)
+
+    # --- subplot 0: load factor lambda ---
+    ax = axes[0]
+    ax.plot(x, lam, "b-", linewidth=1)
+    for st, lv in zip(acc_t, acc_lam):
+        idx = np.where(t_arr == st)[0]
+        if len(idx):
+            ax.plot(idx[-1], lv, "go", markersize=5)
+    ax.axhline(1.0, color="k", linestyle="--", linewidth=1, label=r"$\lambda=1$")
+    add_vlines(ax)
+    ax.set_ylabel(r"load factor $\lambda$")
+    ax.set_xlim(xlim)
+    ax.grid(True, alpha=0.4)
+    ax.set_title("Arc-length continuation (green = accepted step)")
+    ax.legend(fontsize=7)
+
+    # --- subplot 1: load increment per step (lambda - lambda_old, resets each step) ---
+    ax = axes[1]
+    ax.plot(x, dlam, color="teal", linewidth=1)
+    add_vlines(ax)
+    ax.set_ylabel(r"load incr. $\Delta\lambda$")
+    ax.set_xlim(xlim)
+    ax.grid(True, alpha=0.4)
+
+    # --- subplot 2: bulge increment (mean nodal |dd|, consistent w/ residual) ---
+    ax = axes[2]
+    ax.plot(x, dd, color="purple", linewidth=1)
+    add_vlines(ax)
+    ax.set_ylabel(r"bulge incr. mean$|\Delta d|$ (cm)")
+    ax.set_xlim(xlim)
+    ax.grid(True, alpha=0.4)
+
+    # --- subplot 3: adaptive arc step ds (halves on a failed step) ---
+    if ds is not None:
+        ax = axes[3]
+        ax.step(x, ds, where="post", color="darkorange", linewidth=1.2)
+        add_vlines(ax)
+        ax.set_ylabel(r"arc step $\Delta s$ (cm)")
+        ax.set_yscale("log")
+        ax.set_xlim(xlim)
+        ax.grid(True, which="both", alpha=0.4)
+
+    # --- last subplot: coupling residual, log scale ---
+    ax = axes[-1]
+    ax.plot(x, res, "k-", linewidth=1)
+    ax.axhline(tol, color="k", linestyle="--", linewidth=1, label="tol")
+    add_vlines(ax, with_label=True)
+    ax.set_ylabel("Coupling residual")
+    ax.set_yscale("log")
+    ax.set_xlim(xlim)
+    ax.grid(True, which="both", alpha=0.4)
+    ax.set_xlabel("cumulative coupling sub-iteration")
+    ax.legend(fontsize=7)
+
+    from matplotlib.ticker import MaxNLocator
+    for ax in axes:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    plt.tight_layout()
+    fname = os.path.join(out, "arc_lambda.pdf")
+    fig.savefig(fname, bbox_inches="tight")
+    plt.close(fig)
+    print("arc_lambda.pdf")
+
+
 def main_arg(folder, domain="solid", load_step=-1):
     # collect simulations
     out, inp, param = collect_simulations(folder)
@@ -812,10 +912,11 @@ def main_arg(folder, domain="solid", load_step=-1):
 
     plot_res(data, coords, times, param, out, domain, "single", load_step=[load_step])
 
-    # plot IQN-ILS cc coefficients if debug data exists
+    # plot IQN-ILS cc coefficients + arc-length trajectory if their data exist
     for n, f_out in inp.items():
         f_run = os.path.dirname(os.path.dirname(f_out.rstrip("/")))  # go up from partitioned/converged to run root
         plot_cc(f_run, out)
+        plot_arc(f_run, out)
 
 
 def main_convergence(folder):
@@ -858,7 +959,7 @@ def main_convergence(folder):
 
     plt.tight_layout()
     fig.savefig(os.path.join(out, "convergence.pdf"), bbox_inches="tight")
-    plt.cla()
+    plt.close(fig)
 
 
 if __name__ == "__main__":
