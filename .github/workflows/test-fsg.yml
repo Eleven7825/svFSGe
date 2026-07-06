@@ -6,6 +6,17 @@ on:
   push:
     branches:
       - '**'
+  workflow_dispatch:
+    inputs:
+      regenerate_n660:
+        description: "Regenerate the n660 neural-operator reference from THIS runner and commit it (blesses the runner-specific torch output; skips the strict n660 comparison)"
+        type: boolean
+        default: false
+
+# contents: write is needed only for the manual regenerate_n660 dispatch, which
+# commits the refreshed reference back to the branch.
+permissions:
+  contents: write
 
 jobs:
   test-fsg:
@@ -168,8 +179,49 @@ jobs:
             --ref-vtu test_reference/nmax_2/tube_002.vtu \
             --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu"
 
+      - name: Regenerate n660 reference (manual dispatch)
+        if: success() && github.event_name == 'workflow_dispatch' && github.event.inputs.regenerate_n660 == 'true'
+        run: |
+          echo "================================"
+          echo "Regenerating n660 reference from this runner's output..."
+          echo "================================"
+          RESULT_DIR=test_output/n660
+          if [ ! -f "$RESULT_DIR/partitioned_test_n660.json" ]; then
+            echo "ERROR: No n660 test results found in $RESULT_DIR"; exit 1
+          fi
+          # Rebuild the curated reference_results.json (convergence.error + config),
+          # mirroring the format documented in test_reference/nmax_2/README.md.
+          python3 - "$RESULT_DIR/partitioned_test_n660.json" <<'PY'
+          import json, sys
+          full = json.load(open(sys.argv[1]))
+          ref = {
+              "description": "Reference convergence data for the FSGe n660 neural-operator CI test (nmax=2)",
+              "generated_from": "CI runner via workflow_dispatch regenerate_n660",
+              "configuration": {
+                  "nloads": full.get("nloads", full.get("nmax", 2)),
+                  "n_procs": full.get("n_procs", {}),
+                  "coup": {"method": full.get("coup", {}).get("method", ""),
+                           "tol": full.get("coup", {}).get("tol", 0)},
+              },
+              "convergence": {"error": full.get("error", {})},
+          }
+          json.dump(ref, open("test_reference/n660_nmax_2/reference_results.json", "w"), indent=2)
+          print("wrote test_reference/n660_nmax_2/reference_results.json")
+          PY
+          cp "$RESULT_DIR/partitioned/converged/tube_002.vtu" test_reference/n660_nmax_2/tube_002.vtu
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add test_reference/n660_nmax_2/reference_results.json test_reference/n660_nmax_2/tube_002.vtu
+          if git diff --cached --quiet; then
+            echo "n660 reference already up to date; nothing to commit."
+          else
+            git commit -m "CI: regenerate n660 reference from runner [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "Committed refreshed n660 reference."
+          fi
+
       - name: Compare neural-operator (n660) results with reference
-        if: success()
+        if: success() && github.event.inputs.regenerate_n660 != 'true'
         run: |
           echo "================================"
           echo "Comparing neural-operator n660 results with reference baseline..."
