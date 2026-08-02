@@ -352,7 +352,7 @@ class svFSI(Simulation):
         pass
 
     def validate_params(self):
-        assert self.p["coup"]["method"] in ["static", "aitken", "iqn_ils"], (
+        assert self.p["coup"]["method"] in ["static", "aitken", "iqn_ils", "weak", "linesearch"], (
             "Unknown coupling method " + self.p["coup"]["method"]
         )
         if self.p["coup"]["method"] == "iqn_ils":
@@ -525,6 +525,23 @@ class svFSI(Simulation):
         # write geometry to file
         write_geo(join(self.p["f_out"], self.p["interfaces"]["geo_mesh"]), mesh)
 
+    def save_tube(self, idx, folder=None):
+        """Write the current coupling solution as tube_<idx>.vtu (all fields).
+
+        Single reusable VTU-save used by the load-controlled loop, the
+        arc-length driver, and crash/failure handling, so what gets written (and
+        how it is fixed) lives in one place. ``folder`` defaults to the
+        per-iteration sim directory; pass ``self.p["f_conv"]`` for a converged
+        step. ``idx`` may be an int (zero-padded to 3 digits) or a string tag.
+        Returns the written path.
+        """
+        if folder is None:
+            folder = self.p["f_sim"]
+        tag = str(idx).zfill(3) if isinstance(idx, int) else str(idx)
+        path = join(folder, "tube_" + tag + ".vtu")
+        self.curr.archive("tube", path)
+        return path
+
     def set_solid(self, n, t):
         # name of wall properties array
         name = "gr_properties"
@@ -599,15 +616,29 @@ class svFSI(Simulation):
             if getattr(self, "restart_out", None):
                 exe += ["--restart-out", self.restart_out]
 
+        # Optional per-domain wall-clock timeout. On an element-inversion abort the
+        # solver's MPI_Abort can hang indefinitely; a timeout kills it and reports
+        # failure so a continuation driver (arc-length / line search) can back off
+        # instead of wedging. Configure via "solve_timeout": {"solid": <seconds>}.
+        timeout = self.p.get("solve_timeout", {}).get(name)
+
         t_start = time.time()
-        if self.p["debug"]:
-            print(" ".join(exe))
-            child = subprocess.run(exe, cwd=self.p["f_out"])
-        else:
-            i_str = str(i).zfill(3)
-            fn = join(self.p["f_sim"], name + "_" + i_str + ".log")
-            with open(fn, "w") as f:
-                child = subprocess.run(exe, stdout=f, stderr=f, cwd=self.p["f_out"])
+        try:
+            if self.p["debug"]:
+                print(" ".join(exe))
+                child = subprocess.run(exe, cwd=self.p["f_out"], timeout=timeout)
+            else:
+                i_str = str(i).zfill(3)
+                fn = join(self.p["f_sim"], name + "_" + i_str + ".log")
+                with open(fn, "w") as f:
+                    child = subprocess.run(exe, stdout=f, stderr=f,
+                                           cwd=self.p["f_out"], timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # hung solve (e.g. MPI_Abort after a negative Jacobian) -> treat as failure
+            print(f"    [{name}] solve exceeded {timeout}s -> killed, treated as failure")
+            for f in self.curr.sol.keys():
+                self.curr.sol[f] = None
+            return True
         times[name] = time.time() - t_start
 
         # check if simulation crashed and return error

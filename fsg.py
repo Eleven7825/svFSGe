@@ -234,8 +234,10 @@ class FSG(svFSI):
         # archive results
         self.archive()
 
-        # plot convergence (skipped for arc-length: no per-step coupling residual log)
-        if not self.p.get("arc_length", {}).get("enabled"):
+        # plot convergence (skipped for arc-length / line search: no per-step
+        # coupling residual log)
+        if (not self.p.get("arc_length", {}).get("enabled")
+                and self.p["coup"]["method"] not in ["linesearch", "weak"]):
             self.plot_convergence()
 
         # post process
@@ -248,6 +250,17 @@ class FSG(svFSI):
         # Crisfield spherical arc-length continuation (opt-in via JSON "arc_length")
         if self.p.get("arc_length", {}).get("enabled"):
             self._run_arclength(i_start)
+            return
+
+        # Weak coupling with intra-step stimulus homotopy (line search on alpha)
+        if self.p["coup"]["method"] == "linesearch":
+            self._run_linesearch(t_start, i_start)
+            return
+
+        # Weak coupling: one fluid + one solid solve per load step, with
+        # inter-step Aitken relaxation of the interface displacement.
+        if self.p["coup"]["method"] == "weak":
+            self._run_weak(t_start, i_start)
             return
 
         # loop load steps (historical load-controlled scheme)
@@ -297,8 +310,7 @@ class FSG(svFSI):
                     status = True
                 print(out)
 
-                dst = os.path.join(self.p["f_sim"], "tube_" + str(i).zfill(3) + ".vtu")
-                self.curr.archive("tube", dst)
+                self.save_tube(i)
 
                 if status:
                     i_conv = str(i).zfill(3)
@@ -449,6 +461,12 @@ class FSG(svFSI):
                         print("[arc]   solid failed (lam=%.4f, n=%d, ds=%.4f)"
                               % (self._arc_lam, n, ds_try))
                         self._arc_logrow(t, n, self._arc_lam, np.nan, np.nan, ds_try)
+                        # A None solid solution means the solver aborted (e.g.
+                        # element inversion -> negative Jacobian), not mere
+                        # non-convergence. Save the crash state (last-good tube +
+                        # svFSI's crash-state VTU) so the fold-adjacent failure
+                        # geometry is preserved before ds is cut and retried.
+                        self._save_failure_case(t, i)
                         break
                     d_new = deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
                     if not np.all(np.isfinite(d_new)):
@@ -608,8 +626,7 @@ class FSG(svFSI):
             print("[arc-nested] step %d: lam=%.4f (dlam=%+.4f)  ds=%.4f"
                   % (t, lam, lam - lam_old, ds_try))
             shutil.copyfile(last, os.path.join(self.p["f_out"], ckpt))  # commit t-1<-t
-            self.curr.archive("tube", os.path.join(
-                self.p["f_conv"], "tube_" + str(t).zfill(3) + ".vtu"))
+            self.save_tube(t, self.p["f_conv"])
             self.converged += [self.curr.copy()]
             self._arc_good = self.curr.copy()
             self._lam_sched[t] = lam
@@ -758,7 +775,7 @@ class FSG(svFSI):
         dst = os.path.join(self.p["f_out"], ckpt)
         if os.path.exists(src):
             shutil.copyfile(src, dst)
-        self.curr.archive("tube", os.path.join(self.p["f_conv"], "tube_" + str(t).zfill(3) + ".vtu"))
+        self.save_tube(t, self.p["f_conv"])
 
     def _arc_prestress(self, i0):
         """Run prestress (load step 0) through the normal coupling loop (works for
@@ -782,6 +799,258 @@ class FSG(svFSI):
             if status:
                 break
         return i, deepcopy(self.curr.get(("solid", "disp", "int"))).flatten()
+
+    # ======================================================================
+    # Weak coupling with an intra-step stimulus homotopy ("line search" on alpha).
+    # Per load step: solve mesh + fluid ONCE on the entry wall -> "new" stimulus;
+    # then advance the solid from the committed step-(t-1) checkpoint while blending
+    # the applied WSS + pressure  S(alpha) = alpha*new + (1-alpha)*old  (old = the
+    # previous load step's stimulus), alpha ramped 0 -> 1 by ADAPTIVE stepping: a
+    # converged solid solve commits the state and grows alpha; an inversion halves
+    # alpha and retries from the last-good alpha (via the solver's --restart-in /
+    # --restart-out). The fluid is NOT re-solved during the ramp, so the coupling
+    # iterations are replaced by the homotopy. Opt-in: "coup": {"method":
+    # "linesearch", "alpha_ds":0.25, "alpha_ds_min":0.02, "alpha_ds_grow":1.5}.
+    # ======================================================================
+    def _run_linesearch(self, t_start, i_start):
+        ac         = self.p["coup"]
+        dalpha0    = ac.get("alpha_ds", 0.25)
+        dalpha_min = ac.get("alpha_ds_min", 0.02)
+        grow       = ac.get("alpha_ds_grow", 1.5)
+
+        os.makedirs(os.path.join(self.p["f_out"], "ls_ckpt"), exist_ok=True)
+        ckpt = os.path.join("ls_ckpt", "ckpt.bin")
+        scr  = os.path.join("ls_ckpt", "scratch.bin")
+        sd   = self.p["out"]["solid"]
+        last = os.path.join(self.p["f_out"], sd, "stFile_last.bin")
+
+        i   = i_start   # solid file/log counter (monotonic)
+        i_f = i_start   # mesh/fluid file counter (advances once per load step)
+
+        for t in range(t_start, self.p["nloads"] + 1):
+            print("=" * 30 + " t " + str(t) + " ==== fp "
+                  + "{:.2f}".format(self.p_vec[t]) + " " + "=" * 30)
+
+            # ---- one mesh + fluid solve on the entry wall -> the "new" stimulus ----
+            self.restart_in = self.restart_out = None
+            self._arc_active = False
+            times = {}
+            i_f += 1
+            if self.no is not None:
+                self._neural_operator_step(times, i_f, t, 0)
+            elif self.p["fsi"] and i_f > 1:
+                if self.step("mesh", i_f, t, 0, times):
+                    print("mesh simulation failed"); self._save_failure_case(t, i); return
+            self.prev = self.curr.copy()          # entry wall (matches coup_step order)
+            if self.no is None:
+                if self.p["fsi"]:
+                    if self.step("fluid", i_f, t, 0, times):
+                        print("fluid simulation failed"); self._save_failure_case(t, i); return
+                else:
+                    self.poiseuille(t)
+            new_wss   = deepcopy(self.curr.sol["wss"])
+            new_press = deepcopy(self.curr.sol["press"])
+            old_wss, old_press = getattr(self, "_stim_old", (new_wss, new_press))
+
+            if t == 0:
+                # prestress: plain solid solve under the baseline stimulus (new==old)
+                i += 1
+                if self.step("solid", i, t, 0, times):
+                    print("solid simulation failed"); self._save_failure_case(t, i); return
+                if os.path.exists(last):
+                    shutil.copyfile(last, os.path.join(self.p["f_out"], ckpt))
+                print("  [ls] t0 prestress converged")
+            else:
+                # ---- alpha homotopy from the committed step-(t-1) checkpoint ----
+                self._arc_active = True      # post(solid) reads the latest gr_restart VTU
+                good   = self.curr.copy()    # last-good full solution (restore on fail)
+                alpha  = 0.0
+                dalpha = dalpha0
+                nsolve = 0
+                while alpha < 1.0 - 1e-9:
+                    trial = min(alpha + dalpha, 1.0)
+                    self.curr = good.copy()
+                    self.curr.sol["wss"]   = trial * new_wss   + (1.0 - trial) * old_wss
+                    self.curr.sol["press"] = trial * new_press + (1.0 - trial) * old_press
+                    i += 1
+                    nsolve += 1
+                    self.restart_in  = ckpt      # advance from last-good alpha
+                    self.restart_out = scr
+                    times = {}
+                    failed = self.step("solid", i, t, 1, times)   # n=1 -> predictor off
+                    if failed or any(s is None for s in self.curr.sol.values()):
+                        self.curr = good.copy()
+                        if dalpha <= dalpha_min + 1e-12:
+                            print("  [ls] t%d alpha=%.3f: solid failed at dalpha_min -> stop"
+                                  % (t, alpha))
+                            self.restart_in = self.restart_out = None
+                            self._save_failure_case(t, i); return
+                        dalpha = max(dalpha * 0.5, dalpha_min)
+                        print("  [ls] t%d solid failed at alpha=%.3f -> dalpha=%.3f"
+                              % (t, trial, dalpha))
+                        continue
+                    # accepted: promote scratch -> committed, advance and grow alpha
+                    shutil.copyfile(os.path.join(self.p["f_out"], scr),
+                                    os.path.join(self.p["f_out"], ckpt))
+                    good   = self.curr.copy()
+                    alpha  = trial
+                    dalpha = min(dalpha * grow, dalpha0)
+                dd = float(np.linalg.norm(
+                    (self.curr.get(("solid", "disp", "int")).flatten()
+                     - self.prev.get(("solid", "disp", "int")).flatten()
+                     ).reshape(-1, 3), axis=1).mean())
+                print("  [ls] t%d converged: alpha=1 in %d solid solves, mean|dd|=%.4f"
+                      % (t, nsolve, dd))
+
+            # ---- accept the converged load step ----
+            self._stim_old = (deepcopy(new_wss), deepcopy(new_press))
+            self.save_tube(t, self.p["f_conv"])
+            self.converged += [self.curr.copy()]
+            self.restart_in = self.restart_out = None
+
+        self._arc_active = False
+
+    # ======================================================================
+    # Weak coupling with INTER-STEP Aitken relaxation of the interface
+    # displacement d -- no sub-iteration loop, no alpha-ramp. Each load step
+    # t>0 performs exactly ONE fluid solve and ONE solid solve (full target
+    # stimulus, no blending) and is always accepted; the coupling
+    # accelerator's history is built entirely from the OUTER loop, i.e. one
+    # residual per load step, not per sub-iter:
+    #     s      <- Fsolve(wall(d_{t-1}))         one fluid solve on prev wall
+    #     d_t*   <- Ssolve(s, t)                   one solid solve, full target,
+    #                                               n=0 ("beginning of new load
+    #                                               step" -> restart from
+    #                                               committed step-(t-1) state,
+    #                                               same convention as
+    #                                               coup_step_relax)
+    #     r_t    <- d_t* - d_{t-1}                 step residual
+    #     omega_t (Aitken Delta^2, Kuettler) built from (r_{t-1}, r_t) only
+    #     d_t    <- omega_t*d_t* + (1-omega_t)*d_{t-1}
+    # omega and the previous residual persist ACROSS t (they are not reset each
+    # step). A failed solid solve is fatal (no back-off/retry). Config "coup":
+    # {"method":"weak", "omega0":0.1, "omega_min":0.1}.
+    #
+    # Note: d's relaxation only reaches the interface geometry used for the
+    # NEXT step's fluid mesh morph (set_mesh reads self.curr) -- the solid
+    # solver's own restart continuation always resumes from its last raw
+    # (unrelaxed) output, since displacement is solver-output-only (set_solid
+    # writes wss/pressure, never disp). So d-relaxation here damps what wss the
+    # solid sees one step later; it does not make the relaxed d authoritative
+    # for the solid's own state.
+    # ======================================================================
+    def _run_weak(self, t_start, i_start):
+        ac        = self.p["coup"]
+        omega0    = ac.get("omega0", 0.1)
+        omega_min = ac.get("omega_min", 0.1)
+
+        i   = i_start   # solid file/log counter (monotonic)
+        i_f = i_start   # mesh/fluid file counter
+
+        def _fluid_solve(i_f, t):
+            """One mesh+fluid (or NN) solve on the current wall. Returns True on
+            failure."""
+            times = {}
+            if self.no is not None:
+                self._neural_operator_step(times, i_f, t, 0)
+            elif self.p["fsi"] and i_f > 1:
+                if self.step("mesh", i_f, t, 0, times):
+                    print("mesh simulation failed"); return True, times
+            if self.no is None:
+                if self.p["fsi"]:
+                    if self.step("fluid", i_f, t, 0, times):
+                        print("fluid simulation failed"); return True, times
+                else:
+                    self.poiseuille(t)
+            return False, times
+
+        omega    = omega0   # persists across load steps (outer-loop history)
+        res_prev = None
+
+        # dedicated omega/residual history (per load step t), independent of the
+        # self.err/self.p["coup"]["omega"] bookkeeping used by the other coupling
+        # methods (which _run_weak never populates). Written to
+        # f_out/weak_omega_history.json after every step so a mid-run failure
+        # still leaves a complete record up to the last successful step.
+        self.weak_history = []
+        hist_path = os.path.join(self.p["f_out"], "weak_omega_history.json")
+
+        def _save_weak_history():
+            import json as _json
+            with open(hist_path, "w") as f:
+                _json.dump(self.weak_history, f, indent=2)
+
+        for t in range(t_start, self.p["nloads"] + 1):
+            print("=" * 30 + " t " + str(t) + " ==== fp "
+                  + "{:.2f}".format(self.p_vec[t]) + " " + "=" * 30)
+
+            # ---- t == 0: prestress, one plain solid solve ----
+            if t == 0:
+                i_f += 1
+                failed, times = _fluid_solve(i_f, t)
+                if failed:
+                    self._save_failure_case(t, i); return
+                self.prev = self.curr.copy()
+                i += 1
+                if self.step("solid", i, t, 0, times):
+                    print("solid simulation failed"); self._save_failure_case(t, i); return
+                print("  [weak] t0 prestress converged")
+                self.err["disp"].append([1.0])  # placeholder: no prior state to compare
+                self.save_tube(t, self.p["f_conv"])
+                self.converged += [self.curr.copy()]
+                continue
+
+            # ---- t > 0: ONE fluid + ONE solid solve, inter-step Aitken relaxation ----
+            wall     = self.curr.copy()                              # d_{t-1}
+            wall_int = wall.get(("solid", "disp", "int")).flatten()
+
+            i_f += 1
+            failed, times = _fluid_solve(i_f, t)
+            if failed:
+                self._save_failure_case(t, i); return
+
+            # single solid solve; n=0 -> always "beginning of new load step"
+            # (restart from committed step-(t-1) state), since there is no
+            # within-step sub-iteration to continue from.
+            i += 1
+            times_s = {}
+            failed = self.step("solid", i, t, 0, times_s)
+            if failed or any(s is None for s in self.curr.sol.values()):
+                print("  [weak] t%d: solid failed" % t)
+                self._save_failure_case(t, i); return
+
+            # step residual r_t = d_t* - d_{t-1}
+            d_star = self.curr.get(("solid", "disp", "int")).flatten()
+            r = d_star - wall_int
+
+            # Aitken Delta^2 (Kuettler) update of omega from (r_{t-1}, r_t)
+            if res_prev is not None:
+                diff  = r - res_prev
+                denom = float(np.dot(diff, diff))
+                if denom > 0.0:
+                    omega = -omega * float(np.dot(res_prev, diff)) / denom
+                    omega = min(max(omega, omega_min), 1.0)
+            res_prev = r
+
+            # relaxed interface update d_t <- omega*d_t* + (1-omega)*d_{t-1}
+            curr_v = self.curr.get(("solid", "disp", "vol"))    # d_t*
+            prev_v = wall.get(("solid", "disp", "vol"))         # d_{t-1}
+            self.curr.add(("solid", "disp", "vol"),
+                          omega * curr_v + (1.0 - omega) * prev_v)
+
+            err = float(np.mean(np.linalg.norm(r.reshape(-1, 3), axis=1)))
+            print("  [weak] t%d: mean|r|=%.3e, omega=%.3f" % (t, err, omega))
+
+            self.weak_history.append({"t": t, "mean_r": err, "omega": omega})
+            _save_weak_history()
+
+            # also feed the standard self.err bookkeeping (one singleton
+            # sub-iteration list per load step) so archive()/compare_results.py
+            # work unmodified, same as the other coupling methods.
+            self.err["disp"].append([err])
+
+            self.save_tube(t, self.p["f_conv"])
+            self.converged += [self.curr.copy()]
 
     def plot_convergence(self):
         n_sol = len(self.err.keys())
@@ -889,16 +1158,26 @@ class FSG(svFSI):
             shutil.copyfile(src, trg)
 
     def _save_failure_case(self, t, i):
-        """Save failure geometry to failed_cases/ so the oracle pipeline can process it."""
+        """Save the crashing load step's state to this run's OWN result directory.
+
+        Each run keeps its failures self-contained under
+        <f_out>/failed_cases/<tag>/ (rather than a shared global pool), holding:
+          - interface_displacement.dat, meta.json (last-good interface geometry)
+          - tube_lastgood.vtu (full last-good volume: mesh + GR stimuli +
+            Jacobian + WSS + gr_properties)
+          - gr_restart_crash_<cTS>.vtu (svFSI's crash-state dump of the actual
+            inverted configuration at the negative-Jacobian abort)
+        If a shared "failed_cases_dir" is configured (the active-learning oracle
+        pool), the lightweight .dat + meta are ALSO copied there.
+        """
         import json as _json
         import sys as _sys
         _sys.path.insert(0, "/home/shiyi/TAA_CFD_pipeline")
         from generate_displacement import write_displacement_file
 
         tag      = f"t{t:03d}_i{i:03d}_{int(time.time())}"
-        base_dir = self.p.get("failed_cases_dir",
-                              os.path.join(self.p["f_out"], "failed_cases"))
-        case_dir = os.path.join(base_dir, tag)
+        # Primary location: the run's own output directory.
+        case_dir = os.path.join(self.p["f_out"], "failed_cases", tag)
         os.makedirs(case_dir, exist_ok=True)
 
         # Solid solver failed so curr["solid","disp","int"] is None.
@@ -918,6 +1197,41 @@ class FSG(svFSI):
         _json.dump({"t": t, "i": i, "tag": tag, "case_dir": case_dir},
                    open(os.path.join(case_dir, "meta.json"), "w"), indent=2)
         print(f"  [failure] geometry saved → {case_dir}")
+
+        # Richer debugging state for the inversion (the crashing load step
+        # otherwise has no VTU): (a) the last-good full-volume tube; (b) svFSI's
+        # crash-state VTU(s) dumped at the negative-Jacobian abort. Only crash
+        # VTUs not already collected by an earlier failure are copied (the solid
+        # folder is written by the container solver as root, so we copy rather
+        # than move). Wrapped so a snapshot hiccup never aborts the run.
+        if hasattr(self, "prev"):
+            try:
+                self.prev.archive("tube", os.path.join(case_dir, "tube_lastgood.vtu"))
+                print(f"  [failure] last-good tube → {case_dir}/tube_lastgood.vtu")
+            except Exception as e:
+                print(f"  [failure] could not save last-good tube: {e}")
+        if not hasattr(self, "_crashes_seen"):
+            self._crashes_seen = set()
+        crash_dir = os.path.join(self.p["f_out"], self.p["out"]["solid"])
+        for src in sorted(glob.glob(os.path.join(crash_dir, "*_crash_*.vtu"))):
+            if src in self._crashes_seen:
+                continue
+            self._crashes_seen.add(src)
+            try:
+                shutil.copy(src, case_dir)
+                print(f"  [failure] crash-state VTU → {case_dir}/{os.path.basename(src)}")
+            except Exception as e:
+                print(f"  [failure] could not copy crash VTU {os.path.basename(src)}: {e}")
+
+        # Optionally feed the shared oracle pool the lightweight geometry only.
+        pool = self.p.get("failed_cases_dir")
+        if pool and os.path.abspath(pool) != os.path.abspath(
+                os.path.join(self.p["f_out"], "failed_cases")):
+            pool_dir = os.path.join(pool, tag)
+            os.makedirs(pool_dir, exist_ok=True)
+            for fn in ("interface_displacement.dat", "meta.json"):
+                shutil.copy(os.path.join(case_dir, fn), pool_dir)
+            print(f"  [failure] oracle-pool copy → {pool_dir}")
 
     def _wss_relax_beta(self, n):
         """
