@@ -271,6 +271,11 @@ class FSG(svFSI):
                 + "{:.2f}".format(self.p_vec[t]) + " " + "=" * 30
             )
 
+            # optional tighter coupling tolerance for the LAST load step only
+            # (opt-in via "coup": {"tol_final": ...}; no effect otherwise).
+            if t == self.p["nloads"] and "tol_final" in self.p["coup"]:
+                self.p["coup"]["tol"] = self.p["coup"]["tol_final"]
+
             # predict solution for next load step
             if t > 0:
                 self.coup_predict(i, t)
