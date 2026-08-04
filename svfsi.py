@@ -191,7 +191,6 @@ class svFSI(Simulation):
 
         # inject the G&R load profile and insult profile from the JSON into the
         # solid XML
-        self.set_gr_timing()
         self.set_gr_load()
         self.set_gr_insult()
         self.set_gr_growth()
@@ -228,28 +227,6 @@ class svFSI(Simulation):
                 )
         with open(xml_file, "w") as f:
             f.write(xml)
-
-    def set_gr_timing(self):
-        """Calibrate the solid XML's G&R pseudo-time window to this run's
-        nloads, unconditionally (not opt-in).
-
-        gr_equilibrated.cpp's stress_tangent_ ramps the load factor as
-        f_time = (min(t, n_t_end) - n_t_pre) / (n_t_end - n_t_pre), where t is
-        the raw load-step counter sent every solid call (props[:,7] = t+1) and
-        n_t_pre/n_t_end come from the XML's <n_t_pre>/<n_t_end> tags -- NOT
-        from this run's nloads. If those tags are calibrated for a different
-        nloads (e.g. a shared/copy-pasted XML), f_time saturates at 1.0 before
-        the run's last step, and every step past that point still advances the
-        G&R internal-variable integration by a full dt=1.0 at the
-        already-saturated stimulus -- silently over-integrating growth history
-        by however many "extra" steps this run has beyond what the XML was
-        calibrated for. One prestress step (t=0) + nloads G&R steps means
-        props[:,7] reaches nloads+1 at the last step, so n_t_pre=1,
-        n_t_end=nloads+1 is always the correct calibration; there is no
-        legitimate reason for a run to use any other value, so this is not
-        gated behind a config key like tau_ratio_floor.
-        """
-        self._patch_solid_xml({"n_t_pre": 1, "n_t_end": self.p["nloads"] + 1})
 
     def set_gr_growth(self):
         """Inject optional G&R growth-stabilization params into the solid XML.
