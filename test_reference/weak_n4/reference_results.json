@@ -1,5 +1,5 @@
 {
-  "description": "Reference convergence data for the FSGe weak-coupling CI test (nloads=4, inter-step Aitken)",
+  "description": "Reference convergence data for the FSGe weak-coupling CI test (nloads=4, exact prefix of the 80-step production gr_load curve, inter-step Aitken)",
   "generated_from": "local fsg-dev container run",
   "configuration": {
     "nloads": 4,
@@ -20,16 +20,16 @@
           1.0
         ],
         [
-          0.05709247431155628
+          0.02347581093835171
         ],
         [
-          0.053892172212348634
+          0.005769101994921297
         ],
         [
-          0.073105361902048
+          0.007104148973151594
         ],
         [
-          0.09496882692493755
+          0.008550962337374972
         ]
       ]
     }
