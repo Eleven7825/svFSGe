@@ -72,6 +72,15 @@ that s=1.0 at t=80 means true full load. This is deliberately just a
 translation of the known-good baseline into the new F()/S() calling
 convention, not a new algorithm; feel free to replace the schedule, the
 call pattern, or the relaxation scheme entirely.
+
+json, math, os, and numpy (as np) are already imported below at module
+scope and available inside run_coupling -- do not add another `import`
+for any of them inside the function body. Confirmed empirically: doing
+so (e.g. `import os` inside run_coupling) makes Python treat that name
+as local to the whole function, and an earlier use of it in the same
+function (e.g. `os.path.join(...)`) then raises `UnboundLocalError`
+instead of resolving to the module-level import -- this exact mistake
+crashed two separate candidates in early pipeline testing.
 """
 
 import json
