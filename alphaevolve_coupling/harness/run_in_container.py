@@ -31,7 +31,7 @@ def load_candidate(candidate_path):
     spec = importlib.util.spec_from_file_location("candidate_program", candidate_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.run_weak_coupling
+    return module.run_coupling
 
 
 def main():
@@ -43,10 +43,10 @@ def main():
     os.chdir(args.workdir)
 
     try:
-        run_weak_coupling = load_candidate(args.candidate)
+        run_coupling = load_candidate(args.candidate)
 
         from fsg import FSG
-        FSG._run_weak = run_weak_coupling
+        FSG._run_weak = run_coupling
 
         fsg = FSG(os.path.join(args.workdir, "config.json"))
         fsg.run()

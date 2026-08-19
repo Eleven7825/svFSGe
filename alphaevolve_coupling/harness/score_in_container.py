@@ -10,12 +10,11 @@ files, which are only guaranteed present there).
     python3 score_in_container.py --workdir <dir> --result <result.json path>
 
 Score breakdown (weights fixed by the experiment design, not evolvable):
-  stability  (0.4) = s_final in [0, 1], the fraction of this run's own
-                      step budget (nloads) successfully completed (1.0 =
-                      got through all nloads steps without failure -- see
-                      weak_omega_history.json). fsg.p["gr_load"]'s curve
-                      is the real 80-step production trajectory (nloads is
-                      set to 80 for this experiment), so s_final == 1.0
+  stability  (0.4) = s_final in [0, 1], the last ramp fraction "s" the
+                      candidate's own S(s) primitive successfully applied
+                      before any failure (see weak_omega_history.json --
+                      "s" is chosen freely by the evolved code, not tied
+                      to a fixed schedule or step count). s_final == 1.0
                       means true full load (f_time=1.0) was reached.
   accuracy   (0.4) = Displacement-only comparison of the run's last
                       converged tube_*.vtu against a tight-tolerance
