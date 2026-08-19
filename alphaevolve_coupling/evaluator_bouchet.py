@@ -68,7 +68,18 @@ def srun_singularity(shell_command, timeout, cpus):
     # prterun fall back to counting the cgroup's actual CPU cores, which
     # is also exactly what happens locally in Docker (no SLURM env at all
     # there), so this restores the validated local behavior.
-    inner = f"unset $(env | grep ^SLURM_ | cut -d= -f1); {shell_command}"
+    # NOTE: this string passes through an outer "bash -lc" (srun's argv,
+    # already running inside the SLURM-launched environment) before ever
+    # reaching the inner one below -- and $(...) command substitution is
+    # NOT suppressed by double quotes, so the outer bash expands
+    # $(env | grep ...) itself using its own (SLURM-laden) environment.
+    # That's fine for getting the right names, but env's output is
+    # newline-separated, and a newline is a statement separator in bash:
+    # "unset A\nB\nC" became "unset A" followed by trying to *run* B and C
+    # as commands (confirmed empirically). ${!SLURM_@} avoids this --
+    # bash's own prefix-match expansion, space- not newline-separated,
+    # safe regardless of which shell layer evaluates it.
+    inner = f'for _v in ${{!SLURM_@}}; do unset "$_v"; done; {shell_command}'
     singularity_cmd = (
         f"singularity exec --bind {SVFSI_HOST}:/svfsi --bind {REPO_HOST}:{REPO_CONTAINER} "
         f"{IMAGE} bash -lc {json.dumps(inner)}"
