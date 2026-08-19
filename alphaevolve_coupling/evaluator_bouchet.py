@@ -38,12 +38,20 @@ EXPERIMENT_DIR = "alphaevolve_coupling"
 HARNESS_DIR = f"{EXPERIMENT_DIR}/harness"
 
 # SLURM resource request per evaluation -- mirrors the project's existing
-# pulsatile.coarse.sbatch template (partition=day, 8 tasks, 16G): fluid
+# pulsatile.coarse.sbatch template (partition=day, 8 cores, 16G): fluid
 # needs the most MPI ranks of the three solves (n_procs.fluid=3 in
 # config_template.json), so 8 is already generous headroom, not a tight fit.
+#
+# --ntasks=1 --cpus-per-task=N, NOT --ntasks=N: srun runs the given command
+# once per task, so --ntasks=N would launch N independent, colliding copies
+# of the whole harness script instead of giving one process N cores to
+# spawn its own internal mpiexec ranks on (confirmed empirically -- an
+# earlier --ntasks=8 attempt ran 8 separate FSG() instances that stomped on
+# each other's working directory). --ntasks=1 also keeps the allocation on
+# a single node, which --ntasks=N alone does not guarantee.
 SLURM_PARTITION = "day"
 SLURM_TIME = "00:35:00"     # per-evaluation ceiling; comfortably above RUN_TIMEOUT_S
-SLURM_NTASKS = 8
+SLURM_CPUS = 8
 SLURM_MEM = "16G"
 
 RUN_TIMEOUT_S = 1750     # in-container watchdog; leaves margin under the 30 min cap
@@ -51,14 +59,14 @@ HOST_TIMEOUT_S = 1830    # includes SLURM queue wait, not just run time
 SCORE_TIMEOUT_S = 300    # scoring is cheap; margin here is almost all queue wait
 
 
-def srun_singularity(shell_command, timeout, ntasks):
+def srun_singularity(shell_command, timeout, cpus):
     singularity_cmd = (
         f"singularity exec --bind {SVFSI_HOST}:/svfsi --bind {REPO_HOST}:{REPO_CONTAINER} "
         f"{IMAGE} bash -lc {json.dumps(shell_command)}"
     )
     cmd = [
         "srun", f"--partition={SLURM_PARTITION}", f"--time={SLURM_TIME}",
-        f"--ntasks={ntasks}", f"--mem={SLURM_MEM}", "--job-name=ae-svfsge",
+        "--ntasks=1", f"--cpus-per-task={cpus}", f"--mem={SLURM_MEM}", "--job-name=ae-svfsge",
         "bash", "-lc", singularity_cmd,
     ]
     try:
@@ -93,7 +101,7 @@ def main():
                f"{REPO_CONTAINER}/{HARNESS_DIR}/run_in_container.py "
                f"--candidate {container_workdir}/candidate_program.py "
                f"--workdir {container_workdir}")
-    run_result, run_timeout = srun_singularity(run_cmd, HOST_TIMEOUT_S, SLURM_NTASKS)
+    run_result, run_timeout = srun_singularity(run_cmd, HOST_TIMEOUT_S, SLURM_CPUS)
     if run_timeout is not None:
         insights.append({"label": "timeout",
                           "text": "run exceeded the host-side subprocess timeout"})
