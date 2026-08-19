@@ -60,9 +60,18 @@ SCORE_TIMEOUT_S = 300    # scoring is cheap; margin here is almost all queue wai
 
 
 def srun_singularity(shell_command, timeout, cpus):
+    # prterun (svFSI's MPI launcher) auto-detects a resource manager via
+    # SLURM_* env vars and, if found, sizes its process "slots" from
+    # SLURM_NTASKS (always 1 here) rather than SLURM_CPUS_PER_TASK --
+    # confirmed empirically: with these vars visible it refused to start
+    # svFSI's -np 3 fluid solve ("not enough slots"). Stripping them makes
+    # prterun fall back to counting the cgroup's actual CPU cores, which
+    # is also exactly what happens locally in Docker (no SLURM env at all
+    # there), so this restores the validated local behavior.
+    inner = f"unset $(env | grep ^SLURM_ | cut -d= -f1); {shell_command}"
     singularity_cmd = (
         f"singularity exec --bind {SVFSI_HOST}:/svfsi --bind {REPO_HOST}:{REPO_CONTAINER} "
-        f"{IMAGE} bash -lc {json.dumps(shell_command)}"
+        f"{IMAGE} bash -lc {json.dumps(inner)}"
     )
     cmd = [
         "srun", f"--partition={SLURM_PARTITION}", f"--time={SLURM_TIME}",
