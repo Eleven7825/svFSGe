@@ -60,29 +60,17 @@ SCORE_TIMEOUT_S = 300    # scoring is cheap; margin here is almost all queue wai
 
 
 def srun_singularity(shell_command, timeout, cpus):
-    # prterun (svFSI's MPI launcher) auto-detects a resource manager via
-    # SLURM_* env vars and, if found, sizes its process "slots" from
-    # SLURM_NTASKS (always 1 here) rather than SLURM_CPUS_PER_TASK --
-    # confirmed empirically: with these vars visible it refused to start
-    # svFSI's -np 3 fluid solve ("not enough slots"). Stripping them makes
-    # prterun fall back to counting the cgroup's actual CPU cores, which
-    # is also exactly what happens locally in Docker (no SLURM env at all
-    # there), so this restores the validated local behavior.
-    # NOTE: this string passes through an outer "bash -lc" (srun's argv,
-    # already running inside the SLURM-launched environment) before ever
-    # reaching the inner one below -- and $(...) command substitution is
-    # NOT suppressed by double quotes, so the outer bash expands
-    # $(env | grep ...) itself using its own (SLURM-laden) environment.
-    # That's fine for getting the right names, but env's output is
-    # newline-separated, and a newline is a statement separator in bash:
-    # "unset A\nB\nC" became "unset A" followed by trying to *run* B and C
-    # as commands (confirmed empirically). ${!SLURM_@} avoids this --
-    # bash's own prefix-match expansion, space- not newline-separated,
-    # safe regardless of which shell layer evaluates it.
-    inner = f'for _v in ${{!SLURM_@}}; do unset "$_v"; done; {shell_command}'
+    # SLURM_* env vars confuse svFSI's mpiexec/prterun launcher inside the
+    # container (see run_in_container.py's main(), which strips them in
+    # Python -- tried doing it here via a shell "unset" wrapper first, but
+    # that string has to pass through an outer "bash -lc" already running
+    # inside the SLURM-launched environment, and every variant of
+    # expanding/quoting a dynamic variable list survived that one extra
+    # shell layer only to break in some new way; not worth the fragility
+    # when the harness script itself can just do it directly).
     singularity_cmd = (
         f"singularity exec --bind {SVFSI_HOST}:/svfsi --bind {REPO_HOST}:{REPO_CONTAINER} "
-        f"{IMAGE} bash -lc {json.dumps(inner)}"
+        f"{IMAGE} bash -lc {json.dumps(shell_command)}"
     )
     cmd = [
         "srun", f"--partition={SLURM_PARTITION}", f"--time={SLURM_TIME}",

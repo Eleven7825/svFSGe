@@ -40,6 +40,18 @@ def main():
     parser.add_argument("--workdir", required=True)
     args = parser.parse_args()
 
+    # On HPC deployments (e.g. Bouchet), this process runs inside a SLURM
+    # job step; svFSI's mpiexec/prterun launcher auto-detects SLURM_* env
+    # vars and sizes its process "slots" from SLURM_NTASKS rather than the
+    # job's actual CPU allocation, refusing to start multi-rank solves
+    # ("not enough slots") -- confirmed empirically. Stripping them here,
+    # in Python, before any subprocess is spawned, is a no-op locally
+    # (Docker has no SLURM env at all) and avoids the fragility of trying
+    # to do this via a shell "unset" wrapper threaded through several
+    # nested layers of shell quoting (srun -> singularity exec -> bash).
+    for k in [k for k in os.environ if k.startswith("SLURM_")]:
+        del os.environ[k]
+
     os.chdir(args.workdir)
 
     try:
