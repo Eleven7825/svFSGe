@@ -75,6 +75,15 @@ def srun_singularity(shell_command, timeout, cpus):
     cmd = [
         "srun", f"--partition={SLURM_PARTITION}", f"--time={SLURM_TIME}",
         "--ntasks=1", f"--cpus-per-task={cpus}", f"--mem={SLURM_MEM}", "--job-name=ae-svfsge",
+        # srun defaults to replicating the CALLING process's cwd on the
+        # compute node -- but the ae CLI runs this evaluator from a
+        # login-node-local temp dir (/tmp/ae_eval_*), which doesn't exist
+        # on compute nodes (/tmp isn't shared). Pin it explicitly to the
+        # one path guaranteed to exist everywhere (confirmed empirically:
+        # without this, srun logs "couldn't chdir ... going to /tmp
+        # instead" -- harmless here since the inner command cd's to an
+        # absolute container path anyway, but not something to rely on).
+        f"--chdir={REPO_HOST}",
         "bash", "-lc", singularity_cmd,
     ]
     try:
