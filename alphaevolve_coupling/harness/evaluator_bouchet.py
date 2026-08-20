@@ -92,6 +92,33 @@ def srun_singularity(shell_command, timeout, cpus):
         return None, exc
 
 
+def singularity_direct(shell_command, timeout):
+    """Run a lightweight command in the container WITHOUT going through
+    srun/SLURM at all -- for the scoring step only, which just reads VTU
+    files with meshio/numpy and needs the container's Python environment,
+    not dedicated HPC compute. Routing it through srun made it compete
+    for the same 4-job interactive-QOS slots as the real evaluations, so
+    under cluster contention a tiny scoring job could get stuck queued
+    behind heavier evaluation jobs and blow its timeout -- silently
+    turning a genuinely good, already-finished run into a false score=0
+    (confirmed empirically on a live production run: several score_timeout
+    failures with no run_error at all, meaning the simulation itself had
+    already succeeded). Running it directly on the login node sidesteps
+    the SLURM queue entirely, which is exactly what a login node is for
+    with a task this light.
+    """
+    cmd = [
+        "singularity", "exec",
+        "--bind", f"{SVFSI_HOST}:/svfsi", "--bind", f"{REPO_HOST}:{REPO_CONTAINER}",
+        IMAGE, "bash", "-lc", shell_command,
+    ]
+    try:
+        return subprocess.run(cmd, timeout=timeout, capture_output=True, text=True,
+                               cwd=REPO_HOST), None
+    except subprocess.TimeoutExpired as exc:
+        return None, exc
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-file", required=True)
@@ -129,7 +156,7 @@ def main():
 
     score_cmd = (f"python3 {REPO_CONTAINER}/{HARNESS_DIR}/score_in_container.py "
                  f"--workdir {container_workdir} --result {result_path_container}")
-    score_result, score_timeout = srun_singularity(score_cmd, SCORE_TIMEOUT_S, 1)
+    score_result, score_timeout = singularity_direct(score_cmd, SCORE_TIMEOUT_S)
     if score_timeout is not None:
         insights.append({"label": "score_timeout", "text": "scoring step itself timed out"})
     elif score_result.returncode != 0:
