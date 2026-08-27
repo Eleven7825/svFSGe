@@ -234,11 +234,17 @@ class FSG(svFSI):
         # archive results
         self.archive()
 
-        # plot convergence (skipped for arc-length / line search: no per-step
-        # coupling residual log)
+        # plot convergence (skipped for arc-length / line search / weak /
+        # uber_robin: none populate the single global self.p["coup"]["tol"]
+        # plot_convergence() assumes)
         if (not self.p.get("arc_length", {}).get("enabled")
-                and self.p["coup"]["method"] not in ["linesearch", "weak"]):
+                and self.p["coup"]["method"] not in ["linesearch", "weak", "uber_robin"]):
             self.plot_convergence()
+
+        # uber_robin's own convergence plot -- see its docstring for why it
+        # needs a dedicated one (step-varying tolerance, per-step omega reset)
+        if self.p["coup"]["method"] == "uber_robin":
+            self.plot_uber_robin_history()
 
         # post process
         main_arg([self.p["f_out"]])
@@ -261,6 +267,14 @@ class FSG(svFSI):
         # inter-step Aitken relaxation of the interface displacement.
         if self.p["coup"]["method"] == "weak":
             self._run_weak(t_start, i_start)
+            return
+
+        # AlphaEvolve-discovered scheme ("prog-uber-robin"): the real load
+        # curve compressed to a handful of steps, each sub-iterated to a
+        # fixed point with inter-step-reset Aitken relaxation. See
+        # docs/coupling_algorithms.tex Section 4 for the derivation.
+        if self.p["coup"]["method"] == "uber_robin":
+            self._run_uber_robin(t_start, i_start)
             return
 
         # loop load steps (historical load-controlled scheme)
@@ -1056,6 +1070,232 @@ class FSG(svFSI):
 
             self.save_tube(t, self.p["f_conv"])
             self.converged += [self.curr.copy()]
+
+    def _run_uber_robin(self, t_start, i_start):
+        """AlphaEvolve-discovered coupling scheme ("prog-uber-robin"),
+        ported back from an evolutionary search over `_run_weak`. The real
+        load curve is resampled onto `n_steps` (default 10) compressed
+        outer steps instead of the usual ~80, and -- unlike `_run_weak`,
+        which advances the load on every single solve with no inner
+        sub-iteration at all -- each step now sub-iterates a fluid+solid
+        exchange to a fixed point AT that step's fixed load target before
+        advancing. The sub-iteration budget and tolerance are graded by
+        step: cheap and loose for intermediate steps, expensive and tight
+        for the final step, since that is the only state later compared
+        against any accuracy reference. Aitken Delta^2 relaxation is
+        applied WITHIN each step's sub-iteration and reset to `omega0` at
+        the start of every step (unlike `_run_weak`, where it persists
+        and is applied ACROSS steps instead). See docs/coupling_algorithms.tex
+        Section 4 for the full derivation and the Algorithm 4 pseudocode
+        this implements line-for-line.
+
+        Opt-in via {"coup": {"method": "uber_robin", ...}}. Config knobs
+        (all optional, defaults match the discovered algorithm):
+          n_steps                 compressed outer step count N (default 10)
+          omega0                  initial/reset relaxation factor (default 0.1)
+          omega_min               relaxation floor (default 0.1)
+          n_max_mid, n_max_final  sub-iteration budget, intermediate vs
+                                   final step (default 2, 6)
+          tol_mid, tol_final_sub  sub-iteration residual tolerance,
+                                   intermediate vs final step (default 1e-4, 2e-5)
+
+        Recording/visualization: every sub-iteration is appended to
+        self.err["disp"] / self.p["coup"]["omega"]["disp"] in the same
+        list-per-step format the "static"/"aitken" methods use, so
+        plot_convergence() renders the usual residual+omega figure; a
+        richer per-sub-iteration record (t, n, s_t, mean_r, omega,
+        converged, n_max, tol) is written incrementally to
+        f_out/uber_robin_history.json (robust to a mid-run kill) and
+        summarized by plot_uber_robin_history(); every sub-iteration's
+        intermediate state is also saved as a VTU under
+        f_out/sub_iterations/, tagged t<step>_n<sub-iter>, so the
+        within-step convergence trajectory -- not just the converged
+        per-step states in partitioned/converged/ -- can be visualized.
+        """
+        import json as _json
+        import math as _math
+
+        ac          = self.p["coup"]
+        n_steps     = int(ac.get("n_steps", 10))
+        omega0      = ac.get("omega0", 0.1)
+        omega_min   = ac.get("omega_min", 0.1)
+        n_max_mid   = int(ac.get("n_max_mid", 2))
+        n_max_final = int(ac.get("n_max_final", 6))
+        tol_mid     = ac.get("tol_mid", 1e-4)
+        tol_final   = ac.get("tol_final_sub", 2e-5)
+
+        i   = i_start   # solid file/log counter (monotonic)
+        i_f = i_start   # mesh/fluid file counter
+
+        def _fluid_solve(i_f, t):
+            """One mesh+fluid (or NN) solve on the current wall. Returns True on
+            failure."""
+            times = {}
+            if self.no is not None:
+                self._neural_operator_step(times, i_f, t, 0)
+            elif self.p["fsi"] and i_f > 1:
+                if self.step("mesh", i_f, t, 0, times):
+                    print("mesh simulation failed"); return True, times
+            if self.no is None:
+                if self.p["fsi"]:
+                    if self.step("fluid", i_f, t, 0, times):
+                        print("fluid simulation failed"); return True, times
+                else:
+                    self.poiseuille(t)
+            return False, times
+
+        self.uber_robin_history = []
+        hist_path = os.path.join(self.p["f_out"], "uber_robin_history.json")
+        sub_dir = os.path.join(self.p["f_out"], "sub_iterations")
+        os.makedirs(sub_dir, exist_ok=True)
+
+        def _save_history():
+            with open(hist_path, "w") as f:
+                _json.dump(self.uber_robin_history, f, indent=2)
+
+        # ---- t == 0: prestress, one plain solid solve, no sub-iteration ----
+        i_f += 1
+        failed, times = _fluid_solve(i_f, 0)
+        if failed:
+            self._save_failure_case(0, i); return
+        self.prev = self.curr.copy()
+        i += 1
+        if self.step("solid", i, 0, 0, times):
+            print("solid simulation failed"); self._save_failure_case(0, i); return
+        print("  [uber_robin] t0 prestress converged")
+        self.err["disp"].append([1.0])
+        self.p["coup"]["omega"]["disp"].append([1.0])  # no relaxation at prestress
+        self.save_tube(0, self.p["f_conv"])
+        self.save_tube("t000_n0", sub_dir)
+        self.converged += [self.curr.copy()]
+        self.uber_robin_history.append(
+            {"t": 0, "n": 0, "s_t": 0.0, "mean_r": None, "omega": 1.0,
+             "converged": True, "n_max": 1, "tol": None})
+        _save_history()
+
+        for t in range(max(t_start, 1), n_steps + 1):
+            s_t = _math.tanh(2 * t / n_steps) / _math.tanh(2)
+            is_final = (t == n_steps)
+            n_max = n_max_final if is_final else n_max_mid
+            tol   = tol_final if is_final else tol_mid
+
+            print("=" * 30 + " t " + str(t) + " ==== s " + "{:.3f}".format(s_t)
+                  + " (n_max=%d, tol=%.1e) " % (n_max, tol) + "=" * 30)
+
+            omega    = omega0   # reset every outer step -- see Section 4
+            res_prev = None
+            self.err["disp"].append([])
+            self.p["coup"]["omega"]["disp"].append([])
+
+            for n in range(n_max):
+                d_in     = self.curr.copy()                              # state entering this sub-iteration
+                d_in_int = d_in.get(("solid", "disp", "int")).flatten()
+
+                i_f += 1
+                failed, times = _fluid_solve(i_f, t)
+                if failed:
+                    self._save_failure_case(t, i); return
+
+                # single solid solve at the fixed target s_t; load does not
+                # advance within the sub-iteration, only the interface state
+                # is refined
+                i += 1
+                failed = self.step("solid", i, t, n, times)
+                if failed or any(s is None for s in self.curr.sol.values()):
+                    print("  [uber_robin] t%d n%d: solid failed" % (t, n))
+                    self._save_failure_case(t, i); return
+
+                d_star_int = self.curr.get(("solid", "disp", "int")).flatten()
+                r = d_star_int - d_in_int
+                err = float(np.mean(np.linalg.norm(r.reshape(-1, 3), axis=1)))
+
+                # Aitken Delta^2 (Kuettler), across sub-iterations at fixed s_t
+                if res_prev is not None:
+                    diff  = r - res_prev
+                    denom = float(np.dot(diff, diff))
+                    if denom > 0.0:
+                        omega = -omega * float(np.dot(res_prev, diff)) / denom
+                        omega = min(max(omega, omega_min), 1.0)
+
+                # relaxed update, applied whether converged or not
+                curr_v = self.curr.get(("solid", "disp", "vol"))    # d*
+                prev_v = d_in.get(("solid", "disp", "vol"))         # d_in
+                self.curr.add(("solid", "disp", "vol"),
+                              omega * curr_v + (1.0 - omega) * prev_v)
+
+                converged = err < tol or n == n_max - 1
+                print("  [uber_robin] t%d n%d: mean|r|=%.3e, omega=%.3f%s"
+                      % (t, n, err, omega, "  [accept]" if converged else ""))
+
+                self.err["disp"][-1].append(err)
+                self.p["coup"]["omega"]["disp"][-1].append(omega)
+                self.uber_robin_history.append(
+                    {"t": t, "n": n, "s_t": s_t, "mean_r": err, "omega": omega,
+                     "converged": converged, "n_max": n_max, "tol": tol})
+                _save_history()
+                self.save_tube("t%03d_n%d" % (t, n), sub_dir)
+
+                if converged:
+                    break
+                res_prev = r
+
+            self.save_tube(t, self.p["f_conv"])
+            self.converged += [self.curr.copy()]
+
+    def plot_uber_robin_history(self):
+        """Dedicated convergence plot for _run_uber_robin. Unlike the
+        generic plot_convergence(), this makes the per-step reset of omega
+        and the step-varying sub-iteration tolerance explicit, since both
+        are the defining feature of this scheme (see Section 4 of
+        docs/coupling_algorithms.tex). Reads self.uber_robin_history if
+        available, else falls back to the on-disk JSON (so it can be
+        called standalone, post-hoc, on an old run's output directory)."""
+        hist = getattr(self, "uber_robin_history", None)
+        if not hist:
+            hist_path = os.path.join(self.p["f_out"], "uber_robin_history.json")
+            if not os.path.exists(hist_path):
+                return
+            import json as _json
+            with open(hist_path) as f:
+                hist = _json.load(f)
+        if not hist:
+            return
+
+        fig, (ax_r, ax_o) = plt.subplots(2, 1, figsize=(14, 6), dpi=200, sharex="all")
+
+        xs  = list(range(len(hist)))
+        res = [h["mean_r"] for h in hist]
+        omg = [h["omega"] for h in hist]
+        tol = [h["tol"] for h in hist]
+        step_starts = [(i, h["t"]) for i, h in enumerate(hist) if h["n"] == 0]
+
+        ax_r.plot(xs, [r if r is not None else np.nan for r in res], "k.-")
+        ax_r.plot(xs, [tl if tl is not None else np.nan for tl in tol],
+                  "k--", alpha=0.5, label=r"tolerance $\varepsilon(t)$")
+        ax_r.set_yscale("log")
+        ax_r.set_ylabel("sub-iteration residual")
+        ax_r.legend(loc="upper right")
+
+        ax_o.plot(xs, omg, "r.-")
+        ax_o.axhline(hist[0]["omega"], color="r", ls=":", alpha=0.4, label=r"$\omega_0$")
+        ax_o.set_ylim(0.0, 1.0)
+        ax_o.set_ylabel(r"$\omega$")
+        ax_o.set_xlabel("sub-iteration index (resets to $\\omega_0$ at each dashed line)")
+        ax_o.legend(loc="upper right")
+
+        for i, _ in step_starts:
+            for ax in (ax_r, ax_o):
+                ax.axvline(i - 0.5, color="gray", ls="-", alpha=0.3)
+        ax_r.set_xticks([i for i, _ in step_starts],
+                         ["$t_{%d}$" % t for _, t in step_starts])
+
+        n_steps_seen = max(h["t"] for h in hist)
+        ax_r.set_title("prog-uber-robin: N=%d compressed steps, %d total sub-iterations"
+                        % (n_steps_seen, len(hist)))
+
+        fig.savefig(os.path.join(self.p["f_out"], "uber_robin_convergence.png"),
+                    bbox_inches="tight")
+        plt.close(fig)
 
     def plot_convergence(self):
         n_sol = len(self.err.keys())

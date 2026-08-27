@@ -352,7 +352,7 @@ class svFSI(Simulation):
         pass
 
     def validate_params(self):
-        assert self.p["coup"]["method"] in ["static", "aitken", "iqn_ils", "weak", "linesearch"], (
+        assert self.p["coup"]["method"] in ["static", "aitken", "iqn_ils", "weak", "linesearch", "uber_robin"], (
             "Unknown coupling method " + self.p["coup"]["method"]
         )
         if self.p["coup"]["method"] == "iqn_ils":
