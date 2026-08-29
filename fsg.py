@@ -958,6 +958,36 @@ class FSG(svFSI):
     # solid sees one step later; it does not make the relaxed d authoritative
     # for the solid's own state.
     # ======================================================================
+    def _fluid_solve(self, i_f, t, n=0):
+        """One mesh+fluid (or NN) solve on the current wall. Returns True on
+        failure.
+
+        `n` is the caller's sub-iteration index within load step `t` (leave
+        at the default 0 if the caller has no real sub-iteration concept --
+        e.g. _run_weak, _run_linesearch). It's threaded through to every
+        solver call, including the neural-operator surrogate, so a method
+        WITH genuine sub-iteration (currently only _run_uber_robin) gets
+        the NN surrogate's designed WSS ramp-up (_wss_relax_beta(n), which
+        damps the NN's WSS prediction more in a step's early sub-iterations
+        and relaxes it as n grows -- see _neural_operator_step) instead of
+        always seeing n=0 regardless of actual progress. Previously
+        duplicated, with exactly this n=0 bug, as separate closures inside
+        _run_weak and _run_uber_robin.
+        """
+        times = {}
+        if self.no is not None:
+            self._neural_operator_step(times, i_f, t, n)
+        elif self.p["fsi"] and i_f > 1:
+            if self.step("mesh", i_f, t, n, times):
+                print("mesh simulation failed"); return True, times
+        if self.no is None:
+            if self.p["fsi"]:
+                if self.step("fluid", i_f, t, n, times):
+                    print("fluid simulation failed"); return True, times
+            else:
+                self.poiseuille(t)
+        return False, times
+
     def _run_weak(self, t_start, i_start):
         ac        = self.p["coup"]
         omega0    = ac.get("omega0", 0.1)
@@ -965,23 +995,6 @@ class FSG(svFSI):
 
         i   = i_start   # solid file/log counter (monotonic)
         i_f = i_start   # mesh/fluid file counter
-
-        def _fluid_solve(i_f, t):
-            """One mesh+fluid (or NN) solve on the current wall. Returns True on
-            failure."""
-            times = {}
-            if self.no is not None:
-                self._neural_operator_step(times, i_f, t, 0)
-            elif self.p["fsi"] and i_f > 1:
-                if self.step("mesh", i_f, t, 0, times):
-                    print("mesh simulation failed"); return True, times
-            if self.no is None:
-                if self.p["fsi"]:
-                    if self.step("fluid", i_f, t, 0, times):
-                        print("fluid simulation failed"); return True, times
-                else:
-                    self.poiseuille(t)
-            return False, times
 
         omega    = omega0   # persists across load steps (outer-loop history)
         res_prev = None
@@ -1006,7 +1019,7 @@ class FSG(svFSI):
             # ---- t == 0: prestress, one plain solid solve ----
             if t == 0:
                 i_f += 1
-                failed, times = _fluid_solve(i_f, t)
+                failed, times = self._fluid_solve(i_f, t)
                 if failed:
                     self._save_failure_case(t, i); return
                 self.prev = self.curr.copy()
@@ -1024,7 +1037,7 @@ class FSG(svFSI):
             wall_int = wall.get(("solid", "disp", "int")).flatten()
 
             i_f += 1
-            failed, times = _fluid_solve(i_f, t)
+            failed, times = self._fluid_solve(i_f, t)
             if failed:
                 self._save_failure_case(t, i); return
 
@@ -1127,23 +1140,6 @@ class FSG(svFSI):
         i   = i_start   # solid file/log counter (monotonic)
         i_f = i_start   # mesh/fluid file counter
 
-        def _fluid_solve(i_f, t):
-            """One mesh+fluid (or NN) solve on the current wall. Returns True on
-            failure."""
-            times = {}
-            if self.no is not None:
-                self._neural_operator_step(times, i_f, t, 0)
-            elif self.p["fsi"] and i_f > 1:
-                if self.step("mesh", i_f, t, 0, times):
-                    print("mesh simulation failed"); return True, times
-            if self.no is None:
-                if self.p["fsi"]:
-                    if self.step("fluid", i_f, t, 0, times):
-                        print("fluid simulation failed"); return True, times
-                else:
-                    self.poiseuille(t)
-            return False, times
-
         self.uber_robin_history = []
         hist_path = os.path.join(self.p["f_out"], "uber_robin_history.json")
         sub_dir = os.path.join(self.p["f_out"], "sub_iterations")
@@ -1155,7 +1151,7 @@ class FSG(svFSI):
 
         # ---- t == 0: prestress, one plain solid solve, no sub-iteration ----
         i_f += 1
-        failed, times = _fluid_solve(i_f, 0)
+        failed, times = self._fluid_solve(i_f, 0)
         if failed:
             self._save_failure_case(0, i); return
         self.prev = self.curr.copy()
@@ -1192,7 +1188,7 @@ class FSG(svFSI):
                 d_in_int = d_in.get(("solid", "disp", "int")).flatten()
 
                 i_f += 1
-                failed, times = _fluid_solve(i_f, t)
+                failed, times = self._fluid_solve(i_f, t, n)
                 if failed:
                     self._save_failure_case(t, i); return
 
