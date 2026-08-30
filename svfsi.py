@@ -775,10 +775,79 @@ class svFSI(Simulation):
 
         return amplitude_fields, geometries
 
+    def extract_pulsatile_magnitude(self, fname, i, fields, verbose=False):
+        """
+        Extract the true time-averaged magnitude of a vector quantity over the
+        last cardiac cycle: mean_k(||v_k(p)||), i.e. magnitude-then-average
+        (classical TAWSS), as opposed to extract_pulsatile_time_average's
+        mean-then-magnitude.
+
+        Since downstream consumers (Solution.add, svfsi.py) expect an (N,3)
+        vector and recover the stimulus by taking np.linalg.norm(sol, axis=1),
+        the scalar result is packed into the z-component of a zero vector so
+        that norm exactly recovers it - the same convention neural_operator.py
+        uses for delivering scalar WSS predictions.
+
+        Args:
+            fname: Base filename for VTU files (e.g., "steady/steady_")
+            i: Current iteration counter
+            fields: List of field names to extract
+
+        Returns:
+            dict: {field_name: (N,3) array with magnitude in the z-component}
+            list: geometries for archiving
+        """
+        pulsatile_config = self.p.get("pulsatile_config", {})
+        n_reduction_steps = pulsatile_config.get("n_reduction_steps")
+
+        end_step = self.p["n_max"]["fluid"] * i
+        start_step = end_step - n_reduction_steps + 1
+
+        if verbose:
+            print(f"    Pulsatile mode: Averaging magnitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
+
+        src_files = []
+        for step in range(start_step, end_step + 1):
+            filepath = fname + str(step).zfill(3) + ".vtu"
+            fullpath = join(self.p["f_out"], filepath)
+            if os.path.exists(fullpath):
+                src_files.append(fullpath)
+            else:
+                print(f"    WARNING: File not found: {fullpath}")
+
+        if len(src_files) == 0:
+            raise ValueError(f"No VTU files found for magnitude averaging from step {start_step} to {end_step}")
+
+        if verbose:
+            print(f"    Found {len(src_files)} VTU files for magnitude averaging")
+
+        geometries = [read_geo(f).GetOutput() for f in src_files]
+
+        magnitude_fields = {}
+        for field in fields:
+            field_data = []
+            for geo in geometries:
+                if geo.GetPointData().HasArray(sv_names[field]):
+                    field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
+
+            if len(field_data) > 0:
+                stacked = np.array(field_data)  # (n_steps, n_points, 3)
+                mean_mag = np.mean(np.linalg.norm(stacked, axis=2), axis=0)  # (n_points,)
+                packed = np.zeros((mean_mag.shape[0], 3))
+                packed[:, 2] = mean_mag
+                magnitude_fields[field] = packed
+                if verbose:
+                    print(f"    {field}: magnitude averaged over {len(field_data)} time steps")
+            else:
+                magnitude_fields[field] = None
+                print(f"    WARNING: {field} not found in geometries")
+
+        return magnitude_fields, geometries
+
     def extract_pulsatile_data(self, fname, i, fields, verbose=False):
         """
-        Dispatch per-field extraction to either time_average or amplitude based on
-        the pulsatile_config.field_reduction mapping in the JSON.
+        Dispatch per-field extraction to time_average, amplitude, or magnitude
+        based on the pulsatile_config.field_reduction mapping in the JSON.
 
         Default reductions (overridable in JSON under pulsatile_config.field_reduction):
             wss  -> "amplitude"
@@ -800,6 +869,7 @@ class svFSI(Simulation):
 
         avg_fields = [f for f in fields if field_reduction.get(f, "time_average") == "time_average"]
         amp_fields = [f for f in fields if field_reduction.get(f, "time_average") == "amplitude"]
+        mag_fields = [f for f in fields if field_reduction.get(f, "time_average") == "magnitude"]
 
         combined = {}
         geometries = []
@@ -811,6 +881,10 @@ class svFSI(Simulation):
         if amp_fields:
             amp_data, geometries = self.extract_pulsatile_amplitude(fname, i, amp_fields, verbose=verbose)
             combined.update(amp_data)
+
+        if mag_fields:
+            mag_data, geometries = self.extract_pulsatile_magnitude(fname, i, mag_fields, verbose=verbose)
+            combined.update(mag_data)
 
         return combined, geometries
 
