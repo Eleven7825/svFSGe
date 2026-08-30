@@ -717,10 +717,15 @@ class svFSI(Simulation):
 
     def extract_pulsatile_amplitude(self, fname, i, fields, verbose=False):
         """
-        Extract amplitude (max - min) of quantities over the last cardiac cycle.
+        Extract the true magnitude amplitude of a vector quantity over the
+        last cardiac cycle: max_k(||v_k(p)||) - min_k(||v_k(p)||), i.e. the
+        peak-to-peak range of the magnitude signal itself.
 
-        For each field, computes the pointwise difference between the maximum
-        and minimum values across the last n_reduction_steps time steps.
+        Since downstream consumers (Solution.add, svfsi.py) expect an (N,3)
+        vector and recover the stimulus by taking np.linalg.norm(sol, axis=1),
+        the scalar result is packed into the z-component of a zero vector so
+        that norm exactly recovers it (same convention as
+        extract_pulsatile_magnitude).
 
         Args:
             fname: Base filename for VTU files (e.g., "steady/steady_")
@@ -728,7 +733,7 @@ class svFSI(Simulation):
             fields: List of field names to extract (only these fields are processed)
 
         Returns:
-            dict: {field_name: amplitude_data (max - min)}
+            dict: {field_name: (N,3) array with amplitude in the z-component}
             list: geometries for archiving
         """
         pulsatile_config = self.p.get("pulsatile_config", {})
@@ -738,7 +743,7 @@ class svFSI(Simulation):
         start_step = end_step - n_reduction_steps + 1
 
         if verbose:
-            print(f"    Pulsatile mode: Computing amplitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
+            print(f"    Pulsatile mode: Computing magnitude amplitude over time steps {start_step} to {end_step} (last {n_reduction_steps} steps)")
 
         src_files = []
         for step in range(start_step, end_step + 1):
@@ -765,10 +770,14 @@ class svFSI(Simulation):
                     field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
 
             if len(field_data) > 0:
-                stacked = np.array(field_data)
-                amplitude_fields[field] = np.max(stacked, axis=0) - np.min(stacked, axis=0)
+                stacked = np.array(field_data)  # (n_steps, n_points, 3)
+                mag = np.linalg.norm(stacked, axis=2)  # (n_steps, n_points)
+                amp = np.max(mag, axis=0) - np.min(mag, axis=0)  # (n_points,)
+                packed = np.zeros((amp.shape[0], 3))
+                packed[:, 2] = amp
+                amplitude_fields[field] = packed
                 if verbose:
-                    print(f"    {field}: amplitude (max-min) computed over {len(field_data)} time steps")
+                    print(f"    {field}: magnitude amplitude (max-min of ||v||) computed over {len(field_data)} time steps")
             else:
                 amplitude_fields[field] = None
                 print(f"    WARNING: {field} not found in geometries")
