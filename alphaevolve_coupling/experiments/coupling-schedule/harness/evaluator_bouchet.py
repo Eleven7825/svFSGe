@@ -34,7 +34,15 @@ REPO_HOST = os.path.expanduser("~/svFSGe")
 REPO_CONTAINER = "/svFSGe"
 SVFSI_HOST = os.path.expanduser("~/svfsi")
 IMAGE = os.path.join(REPO_HOST, "singularity_images", "simvascular-solver.sif")
-EXPERIMENT_DIR = "alphaevolve_coupling"
+# This experiment's own directory, relative to the repo root -- derived from
+# this file's own location (not hardcoded) so experiments/<name>/ is a
+# fully self-contained, independently relocatable bundle: problem
+# description + seed + evaluator.py + harness/ (this file's own parent),
+# all together, with no assumption about which specific experiment folder
+# they live under. Unlike evaluator.py (which sits at the experiment root),
+# this file lives one level deeper inside harness/, hence the extra dirname.
+HARNESS_DIR_ABS = os.path.dirname(os.path.abspath(__file__))
+EXPERIMENT_DIR = os.path.relpath(os.path.dirname(HARNESS_DIR_ABS), REPO_HOST)
 HARNESS_DIR = f"{EXPERIMENT_DIR}/harness"
 
 # SLURM resource request per evaluation -- mirrors the project's existing

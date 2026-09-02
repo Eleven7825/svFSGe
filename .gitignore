@@ -9,4 +9,4 @@ __pycache__
 !test_assets/**/*.vtk
 partitioned_*/
 test_output/
-alphaevolve_coupling/runs/
+alphaevolve_coupling/experiments/*/runs/

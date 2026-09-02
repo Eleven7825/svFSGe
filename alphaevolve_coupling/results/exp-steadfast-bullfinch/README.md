@@ -5,6 +5,12 @@ Full archive of the production AlphaEvolve experiment evolving `run_coupling`
 here so the run's history is available without SSHing into Bouchet or
 depending on the backend experiment still existing.
 
+This run was defined by
+[`experiments/coupling-schedule/`](../../experiments/coupling-schedule/) —
+its `problem_description.md`/`initial_program.py`/`evaluator.py` are the
+source of truth for what was actually evolved; this directory is only the
+archived *output* of running that definition once.
+
 ## Files
 
 - `programs.json` — raw dump of every program in the experiment

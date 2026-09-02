@@ -1,10 +1,16 @@
 # Experiment results archive
 
-One subdirectory per **completed** AlphaEvolve experiment, named by its `ae`
-nickname (e.g. `exp-steadfast-bullfinch`). Archived here so a run's full
-history survives independently of the Bouchet backend (which can be deleted
-via `ae experiment delete` with no undo) and doesn't require SSHing into
-Bouchet to look up later.
+One subdirectory per **completed** AlphaEvolve experiment *run*, named by
+its `ae` nickname (e.g. `exp-steadfast-bullfinch`). Archived here so a run's
+full history survives independently of the Bouchet backend (which can be
+deleted via `ae experiment delete` with no undo) and doesn't require SSHing
+into Bouchet to look up later.
+
+This is distinct from `../experiments/`: an `experiments/<name>/` directory
+is the *definition* of what to evolve (problem description, seed program,
+evaluator) — one definition can be run many times, and each run's output
+gets its own dated/nicknamed archive here. See each archive's README for
+which `experiments/<name>/` it was run against.
 
 ## Convention for archiving a new experiment
 
