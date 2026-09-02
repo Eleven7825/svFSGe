@@ -60,21 +60,6 @@ import tempfile
 
 import numpy as np
 import torch
-
-# Pin CPU inference to a single thread. torch's default intraop matmul
-# parallelism reduces across threads in an order that depends on runtime
-# scheduling, so identical weights + inputs can still produce different
-# floating-point results (ULP-level) from one process/run to the next.
-# Confirmed as the actual cause of the CI n660 test's flakiness: two CI
-# runs of the exact same commit (byte-identical tree, verified via git
-# diff) gave different VTU comparison results, only in the neural-operator
-# step -- the LDDMM/registration path here is deterministic ("direct"
-# backend: pure KD-tree + SVD projection), so the model's forward pass
-# was the only remaining nondeterministic piece. Single-threaded CPU matmul
-# has a uniquely defined reduction order, making it reproducible run to run.
-torch.set_num_threads(1)
-torch.use_deterministic_algorithms(True)
-
 from scipy.spatial import cKDTree
 
 import vtk
