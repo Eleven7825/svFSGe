@@ -12,6 +12,12 @@ depending on the backend experiment still existing.
   full source code, score + breakdown insight, `parentPrograms` (lineage),
   state, and (for crashed programs) the run/score error traceback. This is
   the canonical record everything else can be regenerated from.
+- `coupling_genealogy.html` — the interactive lineage-tree visualization
+  built from `programs.json` (self-contained, open directly in a browser).
+  Generation columns from the seed outward, winning lineage highlighted,
+  hover for the model's own code comments, click a node for its full
+  source. Also published as a Claude Artifact:
+  https://claude.ai/code/artifact/cf775c0a-c792-472c-93b0-a0f449fd73d2
 
 ## Run parameters
 
