@@ -260,11 +260,23 @@ jobs:
           echo "Reference:    test_reference/n660_nmax_2/reference_results.json"
           echo ""
 
+          # Displacement rtol relaxed to 1e-5 (vs. the standard FSI test's
+          # 1e-8): torch CPU inference is only bit-reproducible within a
+          # single fixed (docker image, torch version, CPU microarch)
+          # environment, not across whatever GitHub Actions' unpinned
+          # `docker pull ...:latest` / unpinned `pip install torch` resolve
+          # to over time. Confirmed empirically -- two separate CI runs of
+          # byte-identical code produced bit-for-bit identical output that
+          # both differed from the committed reference VTU by the same
+          # ~2.7e-6, a deterministic environment mismatch, not per-run
+          # noise. 1e-5 comfortably covers that gap while still catching a
+          # real regression.
           python3 scripts/compare_results.py \
             test_reference/n660_nmax_2/reference_results.json \
             "$RESULT_DIR/partitioned_test_n660.json" \
             --ref-vtu test_reference/n660_nmax_2/tube_002.vtu \
-            --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu"
+            --test-vtu "$RESULT_DIR/partitioned/converged/tube_002.vtu" \
+            --displacement-rtol 1e-5
 
       - name: Regenerate weak-coupling reference (manual dispatch)
         if: success() && github.event_name == 'workflow_dispatch' && github.event.inputs.regenerate_weak == 'true'
