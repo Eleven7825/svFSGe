@@ -1413,8 +1413,17 @@ class FSG(svFSI):
         """
         import json as _json
         import sys as _sys
+
+        # write_displacement_file lives in a separate, machine-local pipeline
+        # (the shared active-learning oracle pool) that isn't present on every
+        # machine this repo runs on. Its output is a bonus for that pipeline,
+        # not something the coupling loop depends on, so its absence must not
+        # abort the run: fall back to skipping just the geometry dump below.
         _sys.path.insert(0, "/home/shiyi/TAA_CFD_pipeline")
-        from generate_displacement import write_displacement_file
+        try:
+            from generate_displacement import write_displacement_file
+        except ImportError:
+            write_displacement_file = None
 
         tag      = f"t{t:03d}_i{i:03d}_{int(time.time())}"
         # Primary location: the run's own output directory.
@@ -1433,11 +1442,14 @@ class FSG(svFSI):
         surf = self.mesh[("int", "solid")]                # vtkPolyData
         ids  = v2n(surf.GetPointData().GetArray("GlobalNodeID")).astype(int)
 
-        write_displacement_file(
-            os.path.join(case_dir, "interface_displacement.dat"), ids, disp)
+        if write_displacement_file is not None:
+            write_displacement_file(
+                os.path.join(case_dir, "interface_displacement.dat"), ids, disp)
         _json.dump({"t": t, "i": i, "tag": tag, "case_dir": case_dir},
                    open(os.path.join(case_dir, "meta.json"), "w"), indent=2)
-        print(f"  [failure] geometry saved → {case_dir}")
+        print(f"  [failure] geometry saved → {case_dir}"
+              if write_displacement_file is not None else
+              f"  [failure] meta saved → {case_dir} (generate_displacement unavailable, geometry dump skipped)")
 
         # Richer debugging state for the inversion (the crashing load step
         # otherwise has no VTU): (a) the last-good full-volume tube; (b) svFSI's
