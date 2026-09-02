@@ -30,9 +30,17 @@ import shutil
 import subprocess
 import time
 
-REPO_HOST = os.path.expanduser("~/svFSGe")
+# realpath, not just expanduser: on Bouchet, ~/svFSGe is itself a symlink
+# into an NFS-mounted project path. os.path.abspath(__file__) below resolves
+# through os.getcwd(), which the OS reports as the PHYSICAL (symlink-
+# resolved) path, not the logical ~-prefixed one -- so comparing an
+# unresolved REPO_HOST against that physical path made every relpath below
+# come out as a broken "../../../nfs/..." instead of the intended
+# "alphaevolve_coupling/...". realpath() puts both sides on the same
+# (physical) basis. Confirmed empirically on Bouchet's actual login node.
+REPO_HOST = os.path.realpath(os.path.expanduser("~/svFSGe"))
 REPO_CONTAINER = "/svFSGe"
-SVFSI_HOST = os.path.expanduser("~/svfsi")
+SVFSI_HOST = os.path.realpath(os.path.expanduser("~/svfsi"))
 IMAGE = os.path.join(REPO_HOST, "singularity_images", "simvascular-solver.sif")
 # This experiment's own directory, relative to the repo root -- derived from
 # this file's own location (not hardcoded) so experiments/<name>/ is a
