@@ -17,7 +17,7 @@
         "q0_rate": 200.0
     },
     "n_max": {
-        "fluid": 400,
+        "fluid": 100,
         "mesh": 1,
         "solid": 1
     },
@@ -35,7 +35,7 @@
     "coup": {
         "nmax": 200,
         "nmin": 1,
-        "tol": 0.001,
+        "tol": 1e-05,
         "method": "iqn_ils",
         "omega0": 0.1,
         "iqn_ils_q": 20,
@@ -70,7 +70,7 @@
         "mesh": "mesh",
         "solid": "gr_restart"
     },
-    "name": "partitioned",
+    "name": "partitioned_pulsatile_iqn_ils_50steps_tol1e-5",
     "paths_linux_ubuntu": {
         "in_geo": "/svFSGe/in_geo",
         "in_petsc": "/svFSGe/in_petsc",

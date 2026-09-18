@@ -17,7 +17,7 @@
         "q0_rate": 200.0
     },
     "n_max": {
-        "fluid": 400,
+        "fluid": 10,
         "mesh": 1,
         "solid": 1
     },
@@ -29,19 +29,19 @@
         "field_reduction": {
             "wss": "amplitude",
             "velo": "time_average",
-            "press": "amplitude"
+            "press": "time_average"
         }
     },
     "coup": {
         "nmax": 200,
         "nmin": 1,
         "tol": 0.001,
-        "method": "iqn_ils",
+        "method": "uber_robin",
+        "n_steps": 2,
         "omega0": 0.1,
-        "iqn_ils_q": 20,
-        "iqn_ils_eps": 0.1
+        "omega_min": 0.1
     },
-    "nloads": 20,
+    "nmax": 20,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {
@@ -70,7 +70,7 @@
         "mesh": "mesh",
         "solid": "gr_restart"
     },
-    "name": "partitioned",
+    "name": "test_uber_robin_pulsatile_amplitude",
     "paths_linux_ubuntu": {
         "in_geo": "/svFSGe/in_geo",
         "in_petsc": "/svFSGe/in_petsc",

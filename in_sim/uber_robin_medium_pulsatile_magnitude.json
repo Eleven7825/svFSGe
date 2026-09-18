@@ -23,8 +23,8 @@
     },
     "pulsatile_config": {
         "n_cycles": 2,
-        "steps_per_cycle": 200,
-        "n_reduction_steps": 200,
+        "steps_per_cycle": 50,
+        "n_reduction_steps": 50,
         "flow_data_file": "pulsatile_flow.dat",
         "field_reduction": {
             "wss": "magnitude",

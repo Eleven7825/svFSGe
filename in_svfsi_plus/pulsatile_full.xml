@@ -4,9 +4,9 @@
 <GeneralSimulationParameters>
   <Continue_previous_simulation> 1 </Continue_previous_simulation>
   <Number_of_spatial_dimensions> 3 </Number_of_spatial_dimensions>
-  <Number_of_time_steps> 400 </Number_of_time_steps>
-  <Number_of_new_time_steps> 400 </Number_of_new_time_steps>
-  <Time_step_size> 0.00476 </Time_step_size>
+  <Number_of_time_steps> 100 </Number_of_time_steps>
+  <Number_of_new_time_steps> 100 </Number_of_new_time_steps>
+  <Time_step_size> 0.01904 </Time_step_size>
   <Spectral_radius_of_infinite_time_step> 0.5 </Spectral_radius_of_infinite_time_step>
 
   <Save_results_to_VTK_format> 1 </Save_results_to_VTK_format>
