@@ -35,11 +35,12 @@
     "coup": {
         "nmax": 200,
         "nmin": 1,
-        "tol": 1e-05,
+        "tol": 0.001,
         "method": "iqn_ils",
         "omega0": 0.1,
         "iqn_ils_q": 20,
-        "iqn_ils_eps": 0.1
+        "iqn_ils_eps": 0.1,
+        "tol_final": 1e-05
     },
     "nloads": 20,
     "fmax": 1.0,
