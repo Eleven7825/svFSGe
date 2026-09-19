@@ -770,14 +770,23 @@ class svFSI(Simulation):
                     field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
 
             if len(field_data) > 0:
-                stacked = np.array(field_data)  # (n_steps, n_points, 3)
-                mag = np.linalg.norm(stacked, axis=2)  # (n_steps, n_points)
-                amp = np.max(mag, axis=0) - np.min(mag, axis=0)  # (n_points,)
-                packed = np.zeros((amp.shape[0], 3))
-                packed[:, 2] = amp
-                amplitude_fields[field] = packed
+                stacked = np.array(field_data)  # (n_steps, n_points) or (n_steps, n_points, 3)
+                if field == "wss" and stacked.ndim == 3:
+                    # only "wss" is norm-recovered downstream (Solution.add);
+                    # magnitude-first, then pack into the z-component so that
+                    # recovery is exact.
+                    mag = np.linalg.norm(stacked, axis=2)  # (n_steps, n_points)
+                    amp = np.max(mag, axis=0) - np.min(mag, axis=0)  # (n_points,)
+                    packed = np.zeros((amp.shape[0], 3))
+                    packed[:, 2] = amp
+                    amplitude_fields[field] = packed
+                else:
+                    # scalar fields (e.g. press) or vector fields consumed
+                    # as-is downstream (e.g. velo): componentwise/raw
+                    # max-min, no magnitude, no packing.
+                    amplitude_fields[field] = np.max(stacked, axis=0) - np.min(stacked, axis=0)
                 if verbose:
-                    print(f"    {field}: magnitude amplitude (max-min of ||v||) computed over {len(field_data)} time steps")
+                    print(f"    {field}: amplitude computed over {len(field_data)} time steps")
             else:
                 amplitude_fields[field] = None
                 print(f"    WARNING: {field} not found in geometries")
@@ -840,11 +849,20 @@ class svFSI(Simulation):
                     field_data.append(v2n(geo.GetPointData().GetArray(sv_names[field])))
 
             if len(field_data) > 0:
-                stacked = np.array(field_data)  # (n_steps, n_points, 3)
-                mean_mag = np.mean(np.linalg.norm(stacked, axis=2), axis=0)  # (n_points,)
-                packed = np.zeros((mean_mag.shape[0], 3))
-                packed[:, 2] = mean_mag
-                magnitude_fields[field] = packed
+                stacked = np.array(field_data)  # (n_steps, n_points) or (n_steps, n_points, 3)
+                if field == "wss" and stacked.ndim == 3:
+                    # only "wss" is norm-recovered downstream (Solution.add);
+                    # magnitude-first, then pack into the z-component so that
+                    # recovery is exact.
+                    mean_mag = np.mean(np.linalg.norm(stacked, axis=2), axis=0)  # (n_points,)
+                    packed = np.zeros((mean_mag.shape[0], 3))
+                    packed[:, 2] = mean_mag
+                    magnitude_fields[field] = packed
+                else:
+                    # scalar fields (e.g. press) or vector fields consumed
+                    # as-is downstream (e.g. velo): plain time-average, no
+                    # magnitude, no packing.
+                    magnitude_fields[field] = np.mean(stacked, axis=0)
                 if verbose:
                     print(f"    {field}: magnitude averaged over {len(field_data)} time steps")
             else:
