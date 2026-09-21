@@ -27,9 +27,9 @@
         "n_reduction_steps": 50,
         "flow_data_file": "pulsatile_flow.dat",
         "field_reduction": {
-            "wss": "amplitude",
+            "wss": "time_average",
             "velo": "time_average",
-            "press": "amplitude"
+            "press": "time_average"
         }
     },
     "coup": {
