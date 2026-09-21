@@ -42,7 +42,7 @@
         "iqn_ils_eps": 0.1,
         "tol_final": 1e-05
     },
-    "nloads": 20,
+    "nloads": 10,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {
