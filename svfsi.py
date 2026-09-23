@@ -871,6 +871,105 @@ class svFSI(Simulation):
 
         return magnitude_fields, geometries
 
+    def _read_field_reduction_vtu(self, field, array_name, verbose=False):
+        """
+        Read one <Add_reduction> block's output file
+        (<field.lower()>_reduction.vtu, e.g. velocity_reduction.vtu) written
+        on the fly by svFSI's C++ exprtk-driven accumulator, instead of
+        scanning every per-step VTU file in this cardiac cycle and reducing
+        them in Python. Shared by extract_wss_from_accumulator (which
+        further packs the result for downstream compatibility) and
+        extract_velocity_from_accumulator/extract_pressure_from_accumulator
+        (which return it as-is).
+
+        Returns the raw (N,) or (N,nChannels) point-data array named
+        array_name, keyed by a 0-based GlobalNodeID that this reorders by
+        if the file's own point order doesn't already match it (normally a
+        no-op -- see the comment inline).
+        """
+        out = self.p["out"]["fluid"]
+        fname_field = f"{field.lower()}_reduction.vtu"
+        fpath = join(self.p["f_out"], out, fname_field)
+
+        if not os.path.exists(fpath):
+            raise FileNotFoundError(
+                f"An accumulator-backed reduction for '{field}' is enabled but "
+                f"'{fpath}' was not found. Check that the fluid solver's XML input "
+                f"has an <Add_reduction> block with <Field> {field} </Field> "
+                "(and Output_file_path left at its default, or matching)."
+            )
+
+        geo = read_geo(fpath).GetOutput()
+        gid = v2n(geo.GetPointData().GetArray("GlobalNodeID")).astype(int).ravel()
+        reduced = v2n(geo.GetPointData().GetArray(array_name))
+
+        # The C++ writer emits GlobalNodeID as a plain 0..N-1 range in file
+        # point order (all_fun::global's own gathered/reindexed order), so
+        # no remapping is normally needed here -- but this reorders by id
+        # rather than silently assuming it, in case that ordering guarantee
+        # ever changes on the C++ side.
+        if not np.array_equal(gid, np.arange(len(gid))):
+            order = np.argsort(gid)
+            reduced = reduced[order]
+
+        if verbose:
+            print(f"    Read {field} reduction from accumulator: {fpath} ({reduced.shape[0]} nodes)")
+        return reduced
+
+    def extract_wss_from_accumulator(self, verbose=False):
+        """
+        Read the WSS time-domain reduction computed on-the-fly by svFSI's
+        C++ exprtk-driven accumulator (an <Add_reduction> block with
+        <Field> WSS </Field> in the fluid solver's XML input) from
+        wss_reduction.vtu, instead of scanning every per-step VTU file in
+        this cardiac cycle and reducing them in Python
+        (extract_pulsatile_amplitude/extract_pulsatile_magnitude). Opt-in
+        via pulsatile_config.wss_reduction_from_accumulator in the JSON
+        config; the reduction formula itself lives in the fluid XML's
+        Update_expr/Finalize_expr, not here.
+
+        Returns an (N,3) array with the reduced scalar packed into the
+        z-component, matching extract_pulsatile_amplitude/_magnitude's own
+        convention, so it drops into the existing downstream consumption
+        (Solution.add / np.linalg.norm(sol, axis=1)) unchanged. (Velocity/
+        Pressure don't need this packing -- see extract_velocity_from_
+        accumulator/extract_pressure_from_accumulator, which return the
+        accumulator's output as-is.)
+        """
+        reduced = self._read_field_reduction_vtu("WSS", "WSS_reduction", verbose=verbose).ravel()
+        packed = np.zeros((reduced.shape[0], 3))
+        packed[:, 2] = reduced
+        return packed
+
+    def extract_velocity_from_accumulator(self, verbose=False):
+        """
+        Read the Velocity time-domain reduction computed on the fly by
+        svFSI's C++ accumulator (an <Add_reduction> block with <Field>
+        Velocity </Field>, Scope=volume) from velocity_reduction.vtu.
+        Opt-in via pulsatile_config.velocity_reduction_from_accumulator.
+
+        Returns an (N,3) array as-is (no z-component packing -- this
+        already matches extract_pulsatile_time_average's own return shape
+        for "velo", so downstream code needs no changes for this field).
+        """
+        got = self._read_field_reduction_vtu("Velocity", "Velocity_reduction", verbose=verbose)
+        if got.ndim == 1:
+            got = got.reshape(-1, 1)
+        return got
+
+    def extract_pressure_from_accumulator(self, verbose=False):
+        """
+        Read the Pressure time-domain reduction computed on the fly by
+        svFSI's C++ accumulator (an <Add_reduction> block with <Field>
+        Pressure </Field>, Scope=volume) from pressure_reduction.vtu.
+        Opt-in via pulsatile_config.pressure_reduction_from_accumulator.
+
+        Returns an (N,) array as-is (matches extract_pulsatile_time_
+        average's own return shape for "press").
+        """
+        got = self._read_field_reduction_vtu("Pressure", "Pressure_reduction", verbose=verbose)
+        return got.ravel()
+
     def extract_pulsatile_data(self, fname, i, fields, verbose=False):
         """
         Dispatch per-field extraction to time_average, amplitude, or magnitude
@@ -880,6 +979,14 @@ class svFSI(Simulation):
             wss  -> "amplitude"
             velo -> "time_average"
             press -> "time_average"
+
+        Any of pulsatile_config.{wss,velocity,pressure}_reduction_from_
+        accumulator (each default false) reads that field directly from
+        its <field>_reduction.vtu instead -- the reduction svFSI's own C++
+        accumulator already computed on the fly, per its <Add_reduction>
+        XML block -- skipping the per-step-VTU scan/reduce below entirely
+        for that field. field_reduction.<field> is then advisory only for
+        that field: the actual formula lives in the fluid XML.
 
         Args:
             fname: Base filename for VTU files
@@ -900,6 +1007,18 @@ class svFSI(Simulation):
 
         combined = {}
         geometries = []
+
+        accumulator_fields = {
+            "wss": ("wss_reduction_from_accumulator", self.extract_wss_from_accumulator),
+            "velo": ("velocity_reduction_from_accumulator", self.extract_velocity_from_accumulator),
+            "press": ("pressure_reduction_from_accumulator", self.extract_pressure_from_accumulator),
+        }
+        for f, (flag, extractor) in accumulator_fields.items():
+            if f in fields and pulsatile_config.get(flag, False):
+                combined[f] = extractor(verbose=verbose)
+                avg_fields = [x for x in avg_fields if x != f]
+                amp_fields = [x for x in amp_fields if x != f]
+                mag_fields = [x for x in mag_fields if x != f]
 
         if avg_fields:
             avg_data, geometries = self.extract_pulsatile_time_average(fname, i, avg_fields, verbose=verbose)
