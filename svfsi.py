@@ -928,15 +928,25 @@ class svFSI(Simulation):
         config; the reduction formula itself lives in the fluid XML's
         Update_expr/Finalize_expr, not here.
 
-        Returns an (N,3) array with the reduced scalar packed into the
-        z-component, matching extract_pulsatile_amplitude/_magnitude's own
-        convention, so it drops into the existing downstream consumption
-        (Solution.add / np.linalg.norm(sol, axis=1)) unchanged. (Velocity/
-        Pressure don't need this packing -- see extract_velocity_from_
-        accumulator/extract_pressure_from_accumulator, which return the
-        accumulator's output as-is.)
+        Returns an (N,3) array. The C++ side's Reduction_mode determines
+        the shape actually written to wss_reduction.vtu, so this branches
+        on it:
+          - Reduction_mode=magnitude (a single scalar channel, shape (N,)):
+            the scalar is packed into the z-component, matching extract_
+            pulsatile_amplitude/_magnitude's own convention, so it drops
+            into the existing downstream consumption (Solution.add /
+            np.linalg.norm(sol, axis=1)) unchanged.
+          - Reduction_mode=componentwise (3 channels, already shape
+            (N,3)): returned as-is, matching extract_pulsatile_time_
+            average's own semantics for "wss" (a raw vector, no
+            magnitude/packing at all). Naively ravel()-ing this case
+            before packing would silently produce a garbage (3N,3) array
+            instead of raising -- confirmed the hard way once already.
         """
-        reduced = self._read_field_reduction_vtu("WSS", "WSS_reduction", verbose=verbose).ravel()
+        reduced = self._read_field_reduction_vtu("WSS", "WSS_reduction", verbose=verbose)
+        if reduced.ndim == 2 and reduced.shape[1] == 3:
+            return reduced
+        reduced = reduced.ravel()
         packed = np.zeros((reduced.shape[0], 3))
         packed[:, 2] = reduced
         return packed
