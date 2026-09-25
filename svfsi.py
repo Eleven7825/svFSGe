@@ -951,6 +951,48 @@ class svFSI(Simulation):
         packed[:, 2] = reduced
         return packed
 
+    def extract_osi_from_accumulator(self, verbose=False):
+        """
+        Read the Oscillatory Shear Index computed on the fly by svFSI's C++
+        accumulator (an <Add_reduction> block with <Field> OSI </Field>,
+        Scope=face) from osi_reduction.vtu. Used, opt-in via
+        pulsatile_config.wss_stimulus_field="OSI", to replace the usual
+        time-averaged-WSS-magnitude value fed into the G&R stimulus with
+        OSI instead -- an exploratory substitution, not a physically
+        validated homeostatic quantity.
+
+        OSI is always a single scalar channel (never componentwise -- see
+        Accumulator::combine_osi()), so this just z-packs it exactly like
+        extract_wss_from_accumulator's own magnitude-mode branch, matching
+        the same downstream convention (Solution.add / np.linalg.norm(sol,
+        axis=1)).
+        """
+        reduced = self._read_field_reduction_vtu("OSI", "OSI_reduction", verbose=verbose).ravel()
+        packed = np.zeros((reduced.shape[0], 3))
+        packed[:, 2] = reduced
+        return packed
+
+    def extract_transwss_from_accumulator(self, verbose=False):
+        """
+        Read the Transverse WSS computed on the fly by svFSI's C++
+        accumulator (an <Add_reduction> block with <Field> TransWSS
+        </Field>, Scope=face) from transwss_reduction.vtu. Used, opt-in via
+        pulsatile_config.wss_stimulus_field="TransWSS", to replace the
+        usual time-averaged-WSS-magnitude value fed into the G&R stimulus
+        with TransWSS instead -- an exploratory substitution, not a
+        physically validated homeostatic quantity.
+
+        TransWSS is always a single scalar channel (never componentwise --
+        see Accumulator::combine_transwss()), so this just z-packs it
+        exactly like extract_wss_from_accumulator's own magnitude-mode
+        branch, matching the same downstream convention (Solution.add /
+        np.linalg.norm(sol, axis=1)).
+        """
+        reduced = self._read_field_reduction_vtu("TransWSS", "TransWSS_reduction", verbose=verbose).ravel()
+        packed = np.zeros((reduced.shape[0], 3))
+        packed[:, 2] = reduced
+        return packed
+
     def extract_velocity_from_accumulator(self, verbose=False):
         """
         Read the Velocity time-domain reduction computed on the fly by
@@ -1018,8 +1060,28 @@ class svFSI(Simulation):
         combined = {}
         geometries = []
 
+        # Opt-in exploratory substitution: feed OSI or TransWSS into the G&R
+        # stimulus in place of the usual time-averaged WSS magnitude. Both
+        # are single-scalar accumulator fields (see extract_osi_from_
+        # accumulator/extract_transwss_from_accumulator), so they drop into
+        # the exact same "wss" slot -- Solution.add()'s wss branch just
+        # takes norm(sol, axis=1) of whatever z-packed array lands here.
+        # Not a physically validated homeostatic quantity; see pulsatile_
+        # config.wss_stimulus_field's own docstring reference above.
+        wss_extractors = {
+            "WSS": self.extract_wss_from_accumulator,
+            "OSI": self.extract_osi_from_accumulator,
+            "TransWSS": self.extract_transwss_from_accumulator,
+        }
+        wss_stimulus_field = pulsatile_config.get("wss_stimulus_field", "WSS")
+        if wss_stimulus_field not in wss_extractors:
+            raise ValueError(
+                f"Unknown pulsatile_config.wss_stimulus_field '{wss_stimulus_field}', "
+                f"expected one of {list(wss_extractors)}"
+            )
+
         accumulator_fields = {
-            "wss": ("wss_reduction_from_accumulator", self.extract_wss_from_accumulator),
+            "wss": ("wss_reduction_from_accumulator", wss_extractors[wss_stimulus_field]),
             "velo": ("velocity_reduction_from_accumulator", self.extract_velocity_from_accumulator),
             "press": ("pressure_reduction_from_accumulator", self.extract_pressure_from_accumulator),
         }
