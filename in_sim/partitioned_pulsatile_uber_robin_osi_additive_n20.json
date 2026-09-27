@@ -58,7 +58,7 @@
     "inp": {
         "fluid": "pulsatile_full_osi_stimulus.xml",
         "mesh": "mesh_full.xml",
-        "solid": "gr_full_restart_additive_n20.xml"
+        "solid": "gr_full_restart_additive_osi_n20.xml"
     },
     "interfaces": {
         "bc_flow": "pulsatile_flow.dat",
