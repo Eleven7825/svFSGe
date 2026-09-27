@@ -47,7 +47,7 @@
         "tol_final_sub": 2e-05,
         "iqn_switch_n": 6
     },
-    "nloads": 10,
+    "nloads": 20,
     "fmax": 1.0,
     "predict_file": false,
     "exe": {
@@ -58,7 +58,7 @@
     "inp": {
         "fluid": "pulsatile_full_transwss_frac_stimulus.xml",
         "mesh": "mesh_full.xml",
-        "solid": "gr_full_restart_additive.xml"
+        "solid": "gr_full_restart_additive_n20.xml"
     },
     "interfaces": {
         "bc_flow": "pulsatile_flow.dat",
