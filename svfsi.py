@@ -974,13 +974,14 @@ class svFSI(Simulation):
 
     def extract_transwss_from_accumulator(self, verbose=False):
         """
-        Read the Transverse WSS computed on the fly by svFSI's C++
+        Read the raw Transverse WSS computed on the fly by svFSI's C++
         accumulator (an <Add_reduction> block with <Field> TransWSS
-        </Field>, Scope=face) from transwss_reduction.vtu. Used, opt-in via
-        pulsatile_config.wss_stimulus_field="TransWSS", to replace the
-        usual time-averaged-WSS-magnitude value fed into the G&R stimulus
-        with TransWSS instead -- an exploratory substitution, not a
-        physically validated homeostatic quantity.
+        </Field>, Scope=face) from transwss_reduction.vtu, as-is (still
+        carries WSS's own units/location-dependent scale). Not used by
+        the default "TransWSS" wss_stimulus_field dispatch -- see
+        extract_transwss_fraction_from_accumulator, which normalizes this
+        by the local WSS magnitude first; kept here for direct inspection/
+        testing of the raw accumulator output.
 
         TransWSS is always a single scalar channel (never componentwise --
         see Accumulator::combine_transwss()), so this just z-packs it
@@ -991,6 +992,40 @@ class svFSI(Simulation):
         reduced = self._read_field_reduction_vtu("TransWSS", "TransWSS_reduction", verbose=verbose).ravel()
         packed = np.zeros((reduced.shape[0], 3))
         packed[:, 2] = reduced
+        return packed
+
+    def extract_transwss_fraction_from_accumulator(self, verbose=False):
+        """
+        Read TransWSS and the WSS magnitude (both computed on the fly by
+        svFSI's C++ accumulator) and combine them into a single
+        dimensionless "transverse fraction" f_trans = TransWSS /
+        WSS_magnitude, per node. This -- not raw TransWSS -- is what
+        pulsatile_config.wss_stimulus_field="TransWSS" actually feeds into
+        the G&R stimulus slot.
+
+        Needs the fluid XML to configure BOTH a Field=TransWSS AND a
+        Field=WSS (Reduction_mode=magnitude) <Add_reduction> block in the
+        same run.
+
+        Unlike raw TransWSS (which inherits WSS's own location-dependent
+        stress scale), f_trans is already dimensionless and bounded, like
+        OSI. Pair this with <Additive_stimulus> true </Additive_stimulus>
+        in the solid XML (gr_equilibrated.cpp's grModelType::
+        additive_stimulus): an ADDITIVE deviation f_trans - f_trans_o from
+        its own frozen prestress baseline is the physically appropriate
+        stimulus form here, exactly as for OSI, since both f_trans and OSI
+        have a homeostatic value intrinsically near zero -- a ratio against
+        a near-zero baseline is ill-conditioned (confirmed empirically: an
+        8-47x blowup from what was actually a modest absolute OSI change).
+
+        Returns an (N,3) array, z-packed like extract_wss_from_accumulator's
+        own magnitude-mode branch.
+        """
+        transwss = self._read_field_reduction_vtu("TransWSS", "TransWSS_reduction", verbose=verbose).ravel()
+        wss_mag = self._read_field_reduction_vtu("WSS", "WSS_reduction", verbose=verbose).ravel()
+        f_trans = transwss / np.maximum(wss_mag, 1e-12)
+        packed = np.zeros((f_trans.shape[0], 3))
+        packed[:, 2] = f_trans
         return packed
 
     def extract_velocity_from_accumulator(self, verbose=False):
@@ -1071,7 +1106,7 @@ class svFSI(Simulation):
         wss_extractors = {
             "WSS": self.extract_wss_from_accumulator,
             "OSI": self.extract_osi_from_accumulator,
-            "TransWSS": self.extract_transwss_from_accumulator,
+            "TransWSS": self.extract_transwss_fraction_from_accumulator,
         }
         wss_stimulus_field = pulsatile_config.get("wss_stimulus_field", "WSS")
         if wss_stimulus_field not in wss_extractors:

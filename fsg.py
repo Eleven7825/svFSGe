@@ -1111,6 +1111,19 @@ class FSG(svFSI):
                                    final step (default 2, 6)
           tol_mid, tol_final_sub  sub-iteration residual tolerance,
                                    intermediate vs final step (default 1e-4, 2e-5)
+          iqn_switch_n            final step only: sub-iteration index at
+                                   which the step switches from Aitken to
+                                   real IQN-ILS extrapolation (coup_step_
+                                   iqn_ils), reusing its own history-based
+                                   least-squares update instead of Aitken
+                                   Delta^2 for the remainder of the step's
+                                   budget (default 6 -- Aitken's early
+                                   iterations still warm up an interface
+                                   state, then IQN-ILS's richer model
+                                   converges the rest faster than more
+                                   Aitken iterations would). Only applies
+                                   to the final step; intermediate steps
+                                   are unaffected.
 
         Recording/visualization: every sub-iteration is appended to
         self.err["disp"] / self.p["coup"]["omega"]["disp"] in the same
@@ -1136,6 +1149,12 @@ class FSG(svFSI):
         n_max_final = int(ac.get("n_max_final", 6))
         tol_mid     = ac.get("tol_mid", 1e-4)
         tol_final   = ac.get("tol_final_sub", 2e-5)
+        iqn_switch_n = int(ac.get("iqn_switch_n", 6))
+        # coup_step_iqn_ils reads these two directly (no .get() default) --
+        # not part of uber_robin's own config convention, so default them to
+        # the same values the iqn_ils coupling method itself defaults to.
+        iqn_switch_q   = ac.get("iqn_switch_q", 20)
+        iqn_switch_eps = ac.get("iqn_switch_eps", 0.1)
 
         i   = i_start   # solid file/log counter (monotonic)
         i_f = i_start   # mesh/fluid file counter
@@ -1180,10 +1199,69 @@ class FSG(svFSI):
 
             omega    = omega0   # reset every outer step -- see Section 4
             res_prev = None
+            iqn_active = False   # becomes True once the final step switches to IQN-ILS
             self.err["disp"].append([])
             self.p["coup"]["omega"]["disp"].append([])
 
             for n in range(n_max):
+                if is_final and n >= iqn_switch_n:
+                    if not iqn_active:
+                        # Switch from Aitken to real IQN-ILS extrapolation.
+                        # self.dk["disp"]/self.res already hold this step's
+                        # own n=0..iqn_switch_n-1 history (backfilled by the
+                        # Aitken branch below, see the "is_final" block right
+                        # after computing r/d_star_int) -- do NOT reset them
+                        # here: coup_step_iqn_ils unconditionally indexes
+                        # self.dk["disp"][-2]/self.res[-2] whenever t>0 and
+                        # n>0 (true for every switched call, since n >=
+                        # iqn_switch_n > 0), assuming continuous per-step
+                        # history already exists; resetting to empty here
+                        # crashes on the very first switched call with an
+                        # IndexError (confirmed the hard way once already).
+                        # coup_step_iqn_ils gates its update on coup_converged(),
+                        # which reads coup.tol/coup.nmin directly, and its real
+                        # extrapolation math reads coup.iqn_ils_q/iqn_ils_eps
+                        # directly too -- none of these are part of uber_robin's
+                        # own tol_mid/tol_final_sub/n_max_mid/n_max_final
+                        # convention (confirmed the hard way: a KeyError on
+                        # iqn_ils_q once coup.tol/nmin alone got it past the
+                        # mat_V-empty check), so set them all here, scoped to
+                        # just this switched regime.
+                        self.p["coup"]["tol"] = tol
+                        self.p["coup"]["nmin"] = 0
+                        self.p["coup"]["iqn_ils_q"] = iqn_switch_q
+                        self.p["coup"]["iqn_ils_eps"] = iqn_switch_eps
+                        iqn_active = True
+
+                    # coup_step_iqn_ils uses one counter for mesh+fluid+solid
+                    # (unlike this loop's separate i_f/i) -- i_f and i are
+                    # already numerically equal at this point (both increment
+                    # once per sub-iteration above), so this is a no-op change
+                    # of convention, not a jump.
+                    i += 1
+                    i_f = i
+                    times = {}
+                    status = self.coup_step_iqn_ils(i, t, n, times)
+                    if any(s is None for s in self.curr.sol.values()):
+                        print("  [uber_robin] t%d n%d: solid failed" % (t, n))
+                        self._save_failure_case(t, i); return
+
+                    err = self.err["disp"][-1][-1]
+                    omega_cur = self.p["coup"]["omega"]["disp"][-1][-1]
+                    converged = bool(status) or n == n_max - 1
+                    print("  [uber_robin/iqn_ils] t%d n%d: mean|r|=%.3e, omega=%.3f%s"
+                          % (t, n, err, omega_cur, "  [accept]" if converged else ""))
+
+                    self.uber_robin_history.append(
+                        {"t": t, "n": n, "s_t": s_t, "mean_r": err, "omega": omega_cur,
+                         "converged": converged, "n_max": n_max, "tol": tol})
+                    _save_history()
+                    self.save_tube("t%03d_n%d" % (t, n), sub_dir)
+
+                    if converged:
+                        break
+                    continue
+
                 d_in     = self.curr.copy()                              # state entering this sub-iteration
                 d_in_int = d_in.get(("solid", "disp", "int")).flatten()
 
@@ -1204,6 +1282,22 @@ class FSG(svFSI):
                 d_star_int = self.curr.get(("solid", "disp", "int")).flatten()
                 r = d_star_int - d_in_int
                 err = float(np.mean(np.linalg.norm(r.reshape(-1, 3), axis=1)))
+
+                if is_final:
+                    # Backfill the shared IQN-ILS history (self.dk["disp"]/
+                    # self.res) even though this sub-iteration itself still
+                    # uses plain Aitken relaxation below -- so that if/when
+                    # this step later switches to coup_step_iqn_ils (n >=
+                    # iqn_switch_n), the last two entries it needs
+                    # ([-1]/[-2]) already reflect this step's own real
+                    # history instead of being empty or stale from an
+                    # earlier step. dtk/dk match coup_step_iqn_ils's own
+                    # definitions exactly (dtk=this solve's raw interface
+                    # disp, dk=state entering this sub-iteration), so the
+                    # first switched call's own dk["disp"]/res appends
+                    # compose correctly with these.
+                    self.dk["disp"] += [d_star_int]
+                    self.res += [r]
 
                 # Aitken Delta^2 (Kuettler), across sub-iterations at fixed s_t
                 if res_prev is not None:
