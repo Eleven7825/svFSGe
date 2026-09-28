@@ -62,7 +62,7 @@
       <n_t_end> 11 </n_t_end>
       <coup_wss> true </coup_wss>
       <additive_stimulus> true </additive_stimulus>
-      <additive_stimulus_scale> 1.0 </additive_stimulus_scale>
+      <additive_stimulus_scale> 0.7 </additive_stimulus_scale>
       <KsKi> 1.0 </KsKi>
       <mult> 1.0 </mult>
       <rIo> 0.6468 </rIo>
