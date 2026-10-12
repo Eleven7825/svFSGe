@@ -29,6 +29,7 @@ sv_names = {
     "press": "Pressure",
     "velo": "Velocity",
     "wss": "WSS",
+    "wss_sens": "WSSSens",
     "pwss": "pWSS",
     "jac": "Jacobian",
     "cauchy": "Cauchy_stress",
@@ -552,6 +553,15 @@ class svFSI(Simulation):
         # set wss
         props = v2n(solid.GetPointData().GetArray(name))
         props[:, 6] = self.curr.get(("solid", "wss", "vol"))
+
+        # set local TransWSS/WSS sensing fraction (opt-in via pulsatile_config.
+        # ksKi_transwss_sensing), independent of whatever field drives the main
+        # "wss" stimulus above -- consumed by gr_equilibrated.cpp's
+        # ksKi_from_transwss loss-of-mechanosensing knock-down. Column 9 was
+        # previously "dtau" (dWSS), read but never used downstream -- see
+        # gr_equilibrated.cpp's own comment at its repurposing.
+        if self.p.get("pulsatile_config", {}).get("ksKi_transwss_sensing", False):
+            props[:, 9] = self.curr.get(("solid", "wss_sens", "vol"))
 
         # set time
         props[:, 7] = t + 1
@@ -1119,6 +1129,11 @@ class svFSI(Simulation):
             "wss": ("wss_reduction_from_accumulator", wss_extractors[wss_stimulus_field]),
             "velo": ("velocity_reduction_from_accumulator", self.extract_velocity_from_accumulator),
             "press": ("pressure_reduction_from_accumulator", self.extract_pressure_from_accumulator),
+            # Independent of wss_stimulus_field above: always the TransWSS/WSS
+            # fraction specifically, used only to drive the solid's
+            # ksKi_from_transwss loss-of-mechanosensing knock-down (see
+            # set_solid()), regardless of what drives the main stimulus.
+            "wss_sens": ("ksKi_transwss_sensing", self.extract_transwss_fraction_from_accumulator),
         }
         for f, (flag, extractor) in accumulator_fields.items():
             if f in fields and pulsatile_config.get(flag, False):
@@ -1165,6 +1180,13 @@ class svFSI(Simulation):
         elif domain == "fluid":
             # read converged steady state flow
             fields = ["velo", "wss", "press"]
+            # opt-in extra channel: the TransWSS/WSS fraction, extracted
+            # independently of whatever field drives the main "wss" stimulus
+            # (wss_stimulus_field), used only to drive the solid's
+            # ksKi_from_transwss loss-of-mechanosensing mechanism -- see
+            # set_solid()'s own use of ("solid", "wss_sens", "vol").
+            if self.p.get("pulsatile_config", {}).get("ksKi_transwss_sensing", False):
+                fields = fields + ["wss_sens"]
 
             # Fluid solver always outputs files from 1 to n_max["fluid"]
             # (these files are overwritten each coupling iteration)
@@ -1225,7 +1247,13 @@ class svFSI(Simulation):
 
         # extract fields
         for f in fields:
-            if f == "wss":
+            if f in ("wss", "wss_sens"):
+                # "wss_sens" (the TransWSS/WSS sensing fraction, opt-in via
+                # pulsatile_config.ksKi_transwss_sensing) shares this branch's
+                # interface-only extraction+storage logic with "wss" -- it is
+                # only ever requested in pulsatile+accumulator mode, so the
+                # steady-mode fallback below (which assumes a "WSS" VTK array
+                # name) is never actually exercised for it.
                 if averaged_data is not None and f in averaged_data and averaged_data[f] is not None:
                     # Pulsatile mode: use time-averaged WSS (already a vector array)
                     sol = averaged_data[f]
@@ -1430,6 +1458,7 @@ class Solution:
             "press": "fluid",
             "velo": "fluid",
             "wss": "fluid",
+            "wss_sens": "fluid",
         }
 
         dim_vec = self.sim.points[("vol", "tube")].shape
@@ -1441,6 +1470,7 @@ class Solution:
             "disp": np.zeros(dim_vec),
             "velo": np.zeros(dim_vec),
             "wss": np.ones(dim_sca) * np.nan,
+            "wss_sens": np.ones(dim_sca) * np.nan,
             "pwss": np.ones(dim_sca) * np.nan,
             "press": np.zeros(dim_sca) * np.nan,
             "jac": np.zeros(dim_sca) * np.nan,
