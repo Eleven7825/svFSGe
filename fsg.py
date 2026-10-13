@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 from vtk.util.numpy_support import vtk_to_numpy as v2n
 
-from svfsi import svFSI, sv_names
+from svfsi import svFSI, sv_names, read_geo
 from post import main_arg
 
 from utilities import QRfiltering_mod
@@ -212,6 +212,64 @@ class FSG(svFSI):
         print(f"  [restart] loaded from {f_restart} (resuming after t={t}, i={i})")
         return t, i
 
+    def load_uber_robin_checkpoint(self, prev_f_out):
+        """Seed this run's Python-level state (self.curr/self.prev) from an
+        earlier _run_uber_robin run's final converged state, for staging two
+        runs end-to-end (e.g. elastin degradation alone, fully converged,
+        THEN a second run adding loss-of-mechanosensing on top) without
+        reusing load_restart()'s npz format -- _run_uber_robin doesn't
+        populate the IQN-ILS-specific state (mat_V/mat_W/dk/dtk) that format
+        is built around, since it manages its own separate per-step
+        bookkeeping (self.err/self.p["coup"]["omega"]).
+
+        Reads prev_f_out's last converged "tube" VTU (partitioned/converged/
+        tube_<n_steps>.vtu) directly into self.curr.sol -- the inverse of
+        Solution.archive("tube", ...): tube VTUs are already stored in the
+        same "tube" index space self.sol itself uses, so no remapping is
+        needed, just reading each field back out by its sv_names[] array
+        name. Also copies the solid/fluid solvers' own stFile_last.bin
+        restart files directly (no snapshot indirection needed, unlike
+        load_restart() -- prev_f_out is a finished run, not a concurrently-
+        running one whose live stFile could be overwritten mid-copy) so
+        svFSI's own Continue_previous_simulation mechanism picks up the
+        G&R/flow internal state exactly where prev_f_out left off.
+
+        The caller is responsible for then invoking _run_uber_robin with
+        t_start >= 1 (its own fresh compressed-step schedule, with the
+        prestress block skipped since self.curr/self.prev are already
+        populated here instead) -- see run()'s uber_robin_checkpoint handling.
+        """
+        n_steps = int(self.p["coup"].get("n_steps", 10))
+        tube_path = os.path.join(prev_f_out, "partitioned", "converged",
+                                  "tube_" + str(n_steps).zfill(3) + ".vtu")
+        if not os.path.exists(tube_path):
+            raise FileNotFoundError(
+                f"load_uber_robin_checkpoint: no converged tube at {tube_path} "
+                f"(expected prev_f_out's own final step, n_steps={n_steps})"
+            )
+        geo = read_geo(tube_path).GetOutput()
+        for f in self.curr.fields:
+            arr = geo.GetPointData().GetArray(sv_names[f])
+            if arr is None:
+                raise ValueError(f"load_uber_robin_checkpoint: missing array "
+                                  f"{sv_names[f]} in {tube_path}")
+            self.curr.sol[f] = v2n(arr)
+        self.prev = self.curr.copy()
+        self.converged = [self.curr.copy()]
+
+        for solver_subdir in self.p["out"].values():
+            src = os.path.join(prev_f_out, solver_subdir, "stFile_last.bin")
+            dst_dir = os.path.join(self.p["f_out"], solver_subdir)
+            os.makedirs(dst_dir, exist_ok=True)
+            if os.path.exists(src):
+                shutil.copy(src, os.path.join(dst_dir, "stFile_last.bin"))
+                print(f"  [uber_robin_checkpoint] copied stFile -> {dst_dir}/")
+            else:
+                print(f"  [uber_robin_checkpoint] WARNING: no stFile found at "
+                      f"{src} -- solver will start without restart")
+
+        print(f"  [uber_robin_checkpoint] loaded from {tube_path}")
+
     def run(self, f_restart=None):
         # CLI flag takes precedence; fall back to JSON "restart" field
         if f_restart is None:
@@ -223,6 +281,21 @@ class FSG(svFSI):
             t_done, i_done = self.load_restart(f_restart)
             t_start = t_done + 1
             i_start = i_done  # preserve counter so svFSI file numbering stays consistent
+
+        # Stage a second _run_uber_robin run from an earlier one's final
+        # converged state (opt-in via JSON "uber_robin_checkpoint": "<prev
+        # run's f_out>"), e.g. to add loss-of-mechanosensing only after
+        # elastin degradation alone has run its own full schedule and
+        # converged. Mutually exclusive with f_restart above (different
+        # mechanisms); t_start=1 gives this run its own fresh compressed
+        # schedule rather than continuing the previous run's own t numbering.
+        checkpoint = self.p.get("uber_robin_checkpoint")
+        if checkpoint is not None:
+            assert self.p["coup"]["method"] == "uber_robin", \
+                "uber_robin_checkpoint only supported for coup.method=uber_robin"
+            self.load_uber_robin_checkpoint(checkpoint)
+            t_start = 1
+            i_start = 0
 
         # run simulation
         try:
@@ -1169,24 +1242,31 @@ class FSG(svFSI):
                 _json.dump(self.uber_robin_history, f, indent=2)
 
         # ---- t == 0: prestress, one plain solid solve, no sub-iteration ----
-        i_f += 1
-        failed, times = self._fluid_solve(i_f, 0)
-        if failed:
-            self._save_failure_case(0, i); return
-        self.prev = self.curr.copy()
-        i += 1
-        if self.step("solid", i, 0, 0, times):
-            print("solid simulation failed"); self._save_failure_case(0, i); return
-        print("  [uber_robin] t0 prestress converged")
-        self.err["disp"].append([1.0])
-        self.p["coup"]["omega"]["disp"].append([1.0])  # no relaxation at prestress
-        self.save_tube(0, self.p["f_conv"])
-        self.save_tube("t000_n0", sub_dir)
-        self.converged += [self.curr.copy()]
-        self.uber_robin_history.append(
-            {"t": 0, "n": 0, "s_t": 0.0, "mean_r": None, "omega": 1.0,
-             "converged": True, "n_max": 1, "tol": None})
-        _save_history()
+        # Skipped when t_start > 0 -- a staged continuation from an earlier
+        # _run_uber_robin run's final converged state (see run()'s
+        # uber_robin_checkpoint / load_uber_robin_checkpoint), which already
+        # populated self.curr/self.prev/self.converged directly, so redoing
+        # prestress here would both be redundant and would overwrite that
+        # restored state with a solve from the ORIGINAL (undegraded) geometry.
+        if t_start == 0:
+            i_f += 1
+            failed, times = self._fluid_solve(i_f, 0)
+            if failed:
+                self._save_failure_case(0, i); return
+            self.prev = self.curr.copy()
+            i += 1
+            if self.step("solid", i, 0, 0, times):
+                print("solid simulation failed"); self._save_failure_case(0, i); return
+            print("  [uber_robin] t0 prestress converged")
+            self.err["disp"].append([1.0])
+            self.p["coup"]["omega"]["disp"].append([1.0])  # no relaxation at prestress
+            self.save_tube(0, self.p["f_conv"])
+            self.save_tube("t000_n0", sub_dir)
+            self.converged += [self.curr.copy()]
+            self.uber_robin_history.append(
+                {"t": 0, "n": 0, "s_t": 0.0, "mean_r": None, "omega": 1.0,
+                 "converged": True, "n_max": 1, "tol": None})
+            _save_history()
 
         for t in range(max(t_start, 1), n_steps + 1):
             s_t = _math.tanh(2 * t / n_steps) / _math.tanh(2)
