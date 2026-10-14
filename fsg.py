@@ -227,12 +227,27 @@ class FSG(svFSI):
         Solution.archive("tube", ...): tube VTUs are already stored in the
         same "tube" index space self.sol itself uses, so no remapping is
         needed, just reading each field back out by its sv_names[] array
-        name. Also copies the solid/fluid solvers' own stFile_last.bin
-        restart files directly (no snapshot indirection needed, unlike
-        load_restart() -- prev_f_out is a finished run, not a concurrently-
-        running one whose live stFile could be overwritten mid-copy) so
-        svFSI's own Continue_previous_simulation mechanism picks up the
-        G&R/flow internal state exactly where prev_f_out left off.
+        name. Also copies the SOLID solver's own stFile_last.bin restart
+        file directly (no snapshot indirection needed, unlike load_restart()
+        -- prev_f_out is a finished run, not a concurrently-running one
+        whose live stFile could be overwritten mid-copy) so svFSI's own
+        Continue_previous_simulation mechanism picks up the G&R internal
+        state (collagen mass fraction history, grInt, etc.) exactly where
+        prev_f_out left off.
+
+        Deliberately does NOT copy the fluid's own stFile_last.bin: the
+        pulsatile+accumulator fluid solve already recomputes a fresh,
+        self-contained ~100-step cycle from the current wall geometry on
+        every single call (confirmed earlier this session -- it does not
+        rely on cross-call flow-history continuity the way the solid does).
+        Copying it in WAS tried once and broke badly: with Continue_
+        previous_simulation=1, the fluid solver treated prev_f_out's own
+        large accumulated step/time count as something to catch up to,
+        running thousands of extra time steps in a single call (observed:
+        all three of a 3-way scale sweep independently hung at the
+        identical NS~4601, matching prev_f_out's own total accumulated
+        step count almost exactly) and burning the full 6-hour job time
+        limit without ever reaching t=1 of the new run's own schedule.
 
         The caller is responsible for then invoking _run_uber_robin with
         t_start >= 1 (its own fresh compressed-step schedule, with the
@@ -257,16 +272,16 @@ class FSG(svFSI):
         self.prev = self.curr.copy()
         self.converged = [self.curr.copy()]
 
-        for solver_subdir in self.p["out"].values():
-            src = os.path.join(prev_f_out, solver_subdir, "stFile_last.bin")
-            dst_dir = os.path.join(self.p["f_out"], solver_subdir)
-            os.makedirs(dst_dir, exist_ok=True)
-            if os.path.exists(src):
-                shutil.copy(src, os.path.join(dst_dir, "stFile_last.bin"))
-                print(f"  [uber_robin_checkpoint] copied stFile -> {dst_dir}/")
-            else:
-                print(f"  [uber_robin_checkpoint] WARNING: no stFile found at "
-                      f"{src} -- solver will start without restart")
+        solver_subdir = self.p["out"]["solid"]
+        src = os.path.join(prev_f_out, solver_subdir, "stFile_last.bin")
+        dst_dir = os.path.join(self.p["f_out"], solver_subdir)
+        os.makedirs(dst_dir, exist_ok=True)
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(dst_dir, "stFile_last.bin"))
+            print(f"  [uber_robin_checkpoint] copied solid stFile -> {dst_dir}/")
+        else:
+            print(f"  [uber_robin_checkpoint] WARNING: no stFile found at "
+                  f"{src} -- solid solver will start without restart")
 
         print(f"  [uber_robin_checkpoint] loaded from {tube_path}")
 
