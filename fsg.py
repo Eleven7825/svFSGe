@@ -283,7 +283,28 @@ class FSG(svFSI):
             print(f"  [uber_robin_checkpoint] WARNING: no stFile found at "
                   f"{src} -- solid solver will start without restart")
 
+        # svFSI's own Continue_previous_simulation mechanism keeps incrementing
+        # its internal step counter from wherever prev_f_out's solid solver
+        # left off -- it does NOT reset to 1 just because this is a new
+        # fsg.py process. This run's own `i` counter (which determines the
+        # *expected* solid VTU filename each call, in svfsi.py's step()) must
+        # be seeded to match, else every solid call's post-solve
+        # file-existence check looks for the wrong filename and incorrectly
+        # reports "solid failed" even when svFSI converged cleanly (confirmed
+        # the hard way: a scale sweep's legs each wrote a perfectly-converged
+        # gr_restart_047.vtu while fsg.py's own counter, left at i_start=0,
+        # expected gr_restart_001.vtu instead).
+        prev_solid_dir = os.path.join(prev_f_out, solver_subdir)
+        pattern = os.path.join(prev_solid_dir, solver_subdir + "_[0-9][0-9][0-9].vtu")
+        prev_steps = sorted(
+            int(os.path.basename(p).rsplit("_", 1)[1].split(".")[0])
+            for p in glob.glob(pattern)
+        )
+        i_start = prev_steps[-1] if prev_steps else 0
+        print(f"  [uber_robin_checkpoint] prev run's last solid step = {i_start}")
+
         print(f"  [uber_robin_checkpoint] loaded from {tube_path}")
+        return i_start
 
     def run(self, f_restart=None):
         # CLI flag takes precedence; fall back to JSON "restart" field
@@ -308,9 +329,8 @@ class FSG(svFSI):
         if checkpoint is not None:
             assert self.p["coup"]["method"] == "uber_robin", \
                 "uber_robin_checkpoint only supported for coup.method=uber_robin"
-            self.load_uber_robin_checkpoint(checkpoint)
+            i_start = self.load_uber_robin_checkpoint(checkpoint)
             t_start = 1
-            i_start = 0
 
         # run simulation
         try:
