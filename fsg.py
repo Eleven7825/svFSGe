@@ -312,7 +312,7 @@ class FSG(svFSI):
             f_restart = self.p.get("restart", None)
 
         # restore coupling state if restarting
-        t_start, i_start = 0, 0
+        t_start, i_start, i_f_start = 0, 0, None
         if f_restart is not None:
             t_done, i_done = self.load_restart(f_restart)
             t_start = t_done + 1
@@ -331,10 +331,11 @@ class FSG(svFSI):
                 "uber_robin_checkpoint only supported for coup.method=uber_robin"
             i_start = self.load_uber_robin_checkpoint(checkpoint)
             t_start = 1
+            i_f_start = 0  # mesh/fluid always start fresh, not continued
 
         # run simulation
         try:
-            self.main(t_start=t_start, i_start=i_start)
+            self.main(t_start=t_start, i_start=i_start, i_f_start=i_f_start)
         except KeyboardInterrupt:
             print("interrupted")
             pass
@@ -357,7 +358,7 @@ class FSG(svFSI):
         # post process
         main_arg([self.p["f_out"]])
 
-    def main(self, t_start=0, i_start=0):
+    def main(self, t_start=0, i_start=0, i_f_start=None):
         # print reynolds number
         print("Re = " + str(int(self.p["re"])))
 
@@ -382,7 +383,7 @@ class FSG(svFSI):
         # fixed point with inter-step-reset Aitken relaxation. See
         # docs/coupling_algorithms.tex Section 4 for the derivation.
         if self.p["coup"]["method"] == "uber_robin":
-            self._run_uber_robin(t_start, i_start)
+            self._run_uber_robin(t_start, i_start, i_f_start)
             return
 
         # loop load steps (historical load-controlled scheme)
@@ -1192,7 +1193,7 @@ class FSG(svFSI):
             self.save_tube(t, self.p["f_conv"])
             self.converged += [self.curr.copy()]
 
-    def _run_uber_robin(self, t_start, i_start):
+    def _run_uber_robin(self, t_start, i_start, i_f_start=None):
         """AlphaEvolve-discovered coupling scheme ("prog-uber-robin"),
         ported back from an evolutionary search over `_run_weak`. The real
         load curve is resampled onto `n_steps` (default 10) compressed
@@ -1265,7 +1266,13 @@ class FSG(svFSI):
         iqn_switch_eps = ac.get("iqn_switch_eps", 0.1)
 
         i   = i_start   # solid file/log counter (monotonic)
-        i_f = i_start   # mesh/fluid file counter
+        # mesh/fluid file counter -- normally kept equal to i_start (the
+        # restart case: mesh/fluid continue in lockstep with solid), but
+        # uber_robin_checkpoint seeds only the solid counter (no mesh/fluid
+        # stFile is carried over -- those domains always start a fresh,
+        # self-contained solve, see load_uber_robin_checkpoint's docstring),
+        # so it passes i_f_start=0 explicitly to keep the two independent.
+        i_f = i_f_start if i_f_start is not None else i_start
 
         self.uber_robin_history = []
         hist_path = os.path.join(self.p["f_out"], "uber_robin_history.json")
