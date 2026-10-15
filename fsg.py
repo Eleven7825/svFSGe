@@ -1355,15 +1355,24 @@ class FSG(svFSI):
                         self.p["coup"]["iqn_ils_eps"] = iqn_switch_eps
                         iqn_active = True
 
-                    # coup_step_iqn_ils uses one counter for mesh+fluid+solid
-                    # (unlike this loop's separate i_f/i) -- i_f and i are
-                    # already numerically equal at this point (both increment
-                    # once per sub-iteration above), so this is a no-op change
-                    # of convention, not a jump.
+                    # coup_step_iqn_ils normally uses one counter for
+                    # mesh+fluid+solid (i_f and i were always numerically
+                    # equal at this point in a fresh run, both incrementing
+                    # once per sub-iteration above). But a checkpointed
+                    # uber_robin run deliberately keeps i_f and i apart
+                    # (mesh/fluid start fresh while solid continues the
+                    # restarted run's own numbering, see
+                    # load_uber_robin_checkpoint) -- forcing i_f = i here
+                    # would jump mesh/fluid's expected filename ahead of
+                    # their own real file sequence, producing a false
+                    # "missing VTU" failure at the very last step (confirmed
+                    # the hard way: scale=1e-2's run reached here cleanly,
+                    # t10 n6, then failed on a nonexistent mesh_070.vtu).
+                    # Pass i_f through as its own counter instead.
                     i += 1
-                    i_f = i
+                    i_f += 1
                     times = {}
-                    status = self.coup_step_iqn_ils(i, t, n, times)
+                    status = self.coup_step_iqn_ils(i, t, n, times, i_mf=i_f)
                     if any(s is None for s in self.curr.sol.values()):
                         print("  [uber_robin] t%d n%d: solid failed" % (t, n))
                         self._save_failure_case(t, i); return
@@ -1784,12 +1793,22 @@ class FSG(svFSI):
         times["mesh"] = 0.0
         times["fluid"] = 0.0
 
-    def coup_step_iqn_ils(self, i, t, n, times):
+    def coup_step_iqn_ils(self, i, t, n, times, i_mf=None):
+        # i_mf: mesh/fluid's own file counter, when it has drifted apart from
+        # the solid counter `i` (checkpointed uber_robin runs, where mesh/
+        # fluid always start fresh while solid continues the restarted
+        # run's own numbering -- see _run_uber_robin's IQN-ILS switch call).
+        # Defaults to `i` for every other caller (_run_arclength, and
+        # _run_uber_robin before the switch point), where the two have
+        # always been numerically identical.
+        if i_mf is None:
+            i_mf = i
+
         # step 0+1: get WSS either from NN surrogate or from mesh+fluid solvers
         if self.no is not None:
-            self._neural_operator_step(times, i, t, n)
-        elif self.p["fsi"] and i > 1:
-            if self.step("mesh", i, t, n, times):
+            self._neural_operator_step(times, i_mf, t, n)
+        elif self.p["fsi"] and i_mf > 1:
+            if self.step("mesh", i_mf, t, n, times):
                 return False
         else:
             times["mesh"] = 0.0
@@ -1800,7 +1819,7 @@ class FSG(svFSI):
         # step 1: fluid update (skipped when neural operator is active)
         if self.no is None:
             if self.p["fsi"]:
-                if self.step("fluid", i, t, n, times):
+                if self.step("fluid", i_mf, t, n, times):
                     return False
             else:
                 self.poiseuille(t)
